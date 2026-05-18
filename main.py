@@ -124,7 +124,6 @@ def update_dynamic_watchlist():
     except Exception: pass
     LAST_SCHEDULE_FETCH = time.time()
 
-# --- NEW: DIRECT API PACER ---
 def get_deep_atd(flight_id):
     try:
         details = fr_api.get_flight_details(flight_id)
@@ -153,6 +152,7 @@ async def radar_loop():
             for f in flights:
                 if not f.latitude or not f.longitude: continue
                
+                icao_id = f.id
                 norm_cs = normalize_callsign(f.callsign)
                 aircraft_type = f.aircraft_code.upper() if f.aircraft_code else ""
                
@@ -172,7 +172,15 @@ async def radar_loop():
                 dist = distance_to_vocb(f.latitude, f.longitude)
                 alt = f.altitude
                 gs = f.ground_speed
+                v_speed = f.vertical_speed if f.vertical_speed is not None else 0
                 on_ground = f.on_ground == 1
+               
+                # --- NEW: GENERAL AVIATION DEPARTURE FILTER ---
+                # If a plane is close to the airport, climbing fast (>250 fpm), isn't already tracked in memory,
+                # and doesn't explicitly have CJB as its destination, it is taking off! Ignore it.
+                if dist < 60 and v_speed > 250 and icao_id not in strips and dest_iata != TARGET_IATA:
+                    continue
+                # ----------------------------------------------
                
                 is_cjb_bound = dest_iata == TARGET_IATA
                 is_auto_expected = (norm_cs in DYNAMIC_WATCHLIST) or (f_num in DYNAMIC_WATCHLIST)
@@ -181,7 +189,6 @@ async def radar_loop():
 
                 if not (is_cjb_bound or is_auto_expected or is_manual_expected or is_in_airspace): continue
 
-                icao_id = f.id
                 current_watchlist_dep = DYNAMIC_WATCHLIST.get(norm_cs) or DYNAMIC_WATCHLIST.get(f_num) or "DEP: --:--"
                
                 eta_str = "--:--"
@@ -295,7 +302,6 @@ html_content = """
         .header-container { position: relative; max-width: 1000px; margin: 0 auto 20px auto; text-align: center; }
         h1 { color: #fff; font-family: sans-serif; letter-spacing: 2px; margin-bottom: 5px; margin-top: 0;}
         .rwy-header { color: #ffeb3b; font-weight: bold; font-size: 1.2em;}
-        /* Clock font increased from 1.4em to 1.8em */
         .utc-clock { position: absolute; top: 0; right: 0; background-color: #000; color: #00ff00; padding: 8px 15px; border: 2px solid #555; font-size: 1.8em; font-weight: bold; box-shadow: 2px 2px 5px rgba(0,0,0,0.5);}
         .board { display: flex; flex-direction: column; gap: 8px; max-width: 1000px; margin: 0 auto; }
         .strip { display: grid; grid-template-columns: 1.5fr 1.5fr 1fr 1fr 1fr; background-color: #ffe0b2; border: 2px solid #000; box-shadow: 3px 3px 5px rgba(0,0,0,0.4); height: 65px; font-weight: bold; font-size: 1.1em; }
@@ -306,7 +312,6 @@ html_content = """
         .small-text { font-size: 0.75em; color: #444; }
         .large-text { font-size: 1.3em; }
         .status-text { text-align: center; font-size: 1.1em; }
-        /* ETA box font explicitly set larger */
         .eta-box { background: #fff; border: 1px solid #000; padding: 2px 5px; text-align: center; display: inline-block; font-size: 1.6em;}
         .landed .eta-box { background: transparent; border: none; text-decoration: line-through;}
     </style>
@@ -365,7 +370,6 @@ html_content = """
                     const block4 = `<div style="align-items: center;"><span class="small-text">ETA (UTC)</span><span class="eta-box">${f.eta}</span></div>`;
                     const tdTime = f.touchdown ? f.touchdown : "--:--:--";
                     const tdColor = f.touchdown ? '#d32f2f' : 'inherit';
-                    // ATA font explicitly matched to ETA size
                     const block5 = `<div><span class="small-text">ATA (UTC)</span><span style="color: ${tdColor}; text-align: center; font-size: 1.6em; font-weight: bold;">${tdTime}</span></div>`;
 
                     div.innerHTML = block1 + block2 + block3 + block4 + block5;
