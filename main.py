@@ -16,14 +16,15 @@ VOCB_LAT = 11.0300
 VOCB_LON = 77.0434
 AIRPORT_ELEV = 1322 
 TARGET_IATA = "CJB"
-
-# Regional Bounding Box (South India/SE Asia)
 REGION_BOUNDS = "40.0,-5.0,50.0,110.0"
 EXPECTED_CALLSIGNS = []
 
-# --- 2. ADVANCED ATC & METAR LOGIC ---
 ACTIVE_RUNWAY = "23"
 LAST_METAR_FETCH = 0
+DYNAMIC_WATCHLIST = {}
+LAST_SCHEDULE_FETCH = 0
+NORMALIZED_MANUAL_LIST = set()
+strips = {}
 
 def get_active_runway():
     global ACTIVE_RUNWAY, LAST_METAR_FETCH
@@ -43,8 +44,7 @@ def get_active_runway():
                         if wind_dir_str.isdigit():
                             wind_dir = int(wind_dir_str)
                             ACTIVE_RUNWAY = "23" if 143 <= wind_dir <= 323 else "05"
-    except Exception:
-        pass
+    except Exception: pass
     LAST_METAR_FETCH = time.time()
     return ACTIVE_RUNWAY
 
@@ -56,7 +56,6 @@ def calculate_bearing(lat1, lon1, lat2, lon2):
     brng = math.atan2(y, x)
     return (math.degrees(brng) + 360) % 360
 
-# --- 3. TRANSLATION DICTIONARIES ---
 AIRLINE_MAP = {
     "6E": "IGO", "AI": "AIC", "UK": "VTI", "SG": "SEJ", "I5": "IAD",
     "IX": "AXB", "QP": "AKJ", "9I": "LLR", "S5": "SDG", "S9": "FLG",
@@ -73,12 +72,10 @@ def normalize_callsign(callsign):
     if not callsign: return "UNK"
     callsign = callsign.strip().upper()
     for iata, icao in AIRLINE_MAP.items():
-        if callsign.startswith(iata):
-            return callsign.replace(iata, icao, 1)
+        if callsign.startswith(iata): return callsign.replace(iata, icao, 1)
     return callsign
 
-def get_icao_airport(iata):
-    return AIRPORT_MAP.get(iata, iata)
+def get_icao_airport(iata): return AIRPORT_MAP.get(iata, iata)
 
 def distance_to_vocb(lat, lon):
     R = 6371
@@ -86,31 +83,18 @@ def distance_to_vocb(lat, lon):
     a = math.sin(dlat/2)**2 + math.cos(math.radians(lat)) * math.cos(math.radians(VOCB_LAT)) * math.sin(dlon/2)**2
     return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
 
-# --- 4. THE STEALTH AUTO-FETCHER ---
-DYNAMIC_WATCHLIST = {}
-LAST_SCHEDULE_FETCH = 0
-NORMALIZED_MANUAL_LIST = {normalize_callsign(cs) for cs in EXPECTED_CALLSIGNS}
-
 def update_dynamic_watchlist():
     global DYNAMIC_WATCHLIST, LAST_SCHEDULE_FETCH
-    if time.time() - LAST_SCHEDULE_FETCH < 1800:
-        return
+    if time.time() - LAST_SCHEDULE_FETCH < 1800: return
        
     url = "https://api.flightradar24.com/common/v1/airport.json"
-    params = {
-        "code": TARGET_IATA,
-        "plugin[]": "schedule",
-        "plugin-setting[schedule][mode]": "arrivals",
-        "plugin-setting[schedule][timestamp]": int(time.time()),
-        "page": 1, "limit": 100
-    }
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0.0.0 Safari/537.36", "Accept": "application/json"}
+    params = {"code": TARGET_IATA, "plugin[]": "schedule", "plugin-setting[schedule][mode]": "arrivals", "plugin-setting[schedule][timestamp]": int(time.time()), "page": 1, "limit": 100}
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0.0.0 Safari/537.36"}
    
     try:
         r = requests.get(url, headers=headers, params=params, timeout=10)
         if r.status_code == 200:
-            data = r.json()
-            arrivals = data.get("result", {}).get("response", {}).get("airport", {}).get("pluginData", {}).get("schedule", {}).get("arrivals", {}).get("data", [])
+            arrivals = r.json().get("result", {}).get("response", {}).get("airport", {}).get("pluginData", {}).get("schedule", {}).get("arrivals", {}).get("data", [])
             new_dict = {}
             for entry in arrivals:
                 f_info = entry.get("flight", {})
@@ -118,15 +102,145 @@ def update_dynamic_watchlist():
                 if cs_raw:
                     norm_cs = normalize_callsign(cs_raw)
                     times = f_info.get("time", {})
-                    dep_unix = times.get("real", {}).get("departure") or times.get("scheduled", {}).get("departure")
-                    dep_str = datetime.fromtimestamp(dep_unix, timezone.utc).strftime("%H:%M") + "Z" if dep_unix else "--:--Z"
+                    real_dep = times.get("real", {}).get("departure")
+                    sch_dep = times.get("scheduled", {}).get("departure")
+                   
+                    # ATD vs STD Logic
+                    if real_dep:
+                        dep_str = "ATD: " + datetime.fromtimestamp(real_dep, timezone.utc).strftime("%H:%M") + "Z"
+                    elif sch_dep:
+                        dep_str = "STD: " + datetime.fromtimestamp(sch_dep, timezone.utc).strftime("%H:%M") + "Z"
+                    else:
+                        dep_str = "DEP: --:--Z"
+                       
                     new_dict[norm_cs] = dep_str
             if new_dict: DYNAMIC_WATCHLIST = new_dict
-    except Exception:
-        pass
+    except Exception: pass
     LAST_SCHEDULE_FETCH = time.time()
 
-# --- 5. FRONTEND WEB PAGE (Merged HTML) ---
+# --- BACKGROUND RADAR ENGINE ---
+async def radar_loop():
+    global strips
+    while True:
+        update_dynamic_watchlist()
+        rwy_in_use = get_active_runway()
+       
+        try:
+            flights = fr_api.get_flights(bounds=REGION_BOUNDS)
+            now = time.time()
+           
+            for f in flights:
+                if not f.latitude or not f.longitude: continue
+                if f.origin_airport_iata == TARGET_IATA: continue
+                dest_iata = f.destination_airport_iata
+                if dest_iata and dest_iata not in [TARGET_IATA, "N/A", ""]: continue
+
+                dist = distance_to_vocb(f.latitude, f.longitude)
+                alt = f.altitude
+                gs = f.ground_speed
+                on_ground = f.on_ground == 1
+                norm_cs = normalize_callsign(f.callsign)
+               
+                is_cjb_bound = dest_iata == TARGET_IATA
+                is_auto_expected = norm_cs in DYNAMIC_WATCHLIST
+                is_manual_expected = norm_cs in NORMALIZED_MANUAL_LIST
+               
+                # Expanded Catch-all for Cold Starts (Catches planes at 25NM/20,000ft)
+                is_in_airspace = (dist < 100) and (alt < 20000)
+
+                if not (is_cjb_bound or is_auto_expected or is_manual_expected or is_in_airspace): continue
+
+                icao_id = f.id
+                dep_time_str = DYNAMIC_WATCHLIST.get(norm_cs, "DEP: --:--Z")
+               
+                eta_str = "--:--"
+                eta_unix = float('inf')
+               
+                if gs > 50 and not on_ground:
+                    bearing = calculate_bearing(f.latitude, f.longitude, VOCB_LAT, VOCB_LON)
+                    rwy_heading = 233 if rwy_in_use == "23" else 53
+                    angle_diff = abs((bearing - rwy_heading + 180) % 360 - 180)
+                    lateral_miles = dist + 40 if angle_diff > 90 else dist + 15
+                   
+                    alt_to_lose = max(0, alt - AIRPORT_ELEV)
+                    required_descent_dist_km = (alt_to_lose / 1000) * 3 * 1.852
+                    true_track_distance = max(lateral_miles, required_descent_dist_km)
+                   
+                    if alt < 5000: phase_speed = 260
+                    elif alt < 10000: phase_speed = 450
+                    elif alt < 20000: phase_speed = 550
+                    else: phase_speed = 750
+                       
+                    blended_speed_kmh = (gs * 1.852 * 0.4) + (phase_speed * 0.6)
+                    hours_remaining = true_track_distance / max(blended_speed_kmh, 250)
+                   
+                    eta_time = datetime.now(timezone.utc) + timedelta(hours=hours_remaining)
+                    eta_str = eta_time.strftime("%H:%M") + "Z"
+                    eta_unix = eta_time.timestamp()
+
+                # Memory Updates & Cold Start Initialization Fix
+                if icao_id not in strips and not on_ground:
+                    init_status = "EN ROUTE"
+                    if dist < 100: init_status = "APPROACH"
+                    if dist < 10 and alt <= AIRPORT_ELEV + 1000: init_status = "LANDED"
+                   
+                    strips[icao_id] = {
+                        "callsign": norm_cs, "origin": get_icao_airport(f.origin_airport_iata) if f.origin_airport_iata else "UNK",
+                        "dest": "VOCB", "aircraft": f.aircraft_code if f.aircraft_code else "UNK", "speed": gs,
+                        "status": init_status, "dep_time": dep_time_str, "eta": eta_str, "sort_time": eta_unix,
+                        "touchdown": None, "last_seen": now, "distance": int(dist)
+                    }
+
+                if icao_id in strips:
+                    s = strips[icao_id]
+                    s["last_seen"] = now
+                    s["distance"] = int(dist)
+                    s["speed"] = gs
+                   
+                    if s["status"] != "LANDED":
+                        s["eta"] = eta_str
+                        s["sort_time"] = eta_unix
+                       
+                    if "DEP: --" in s["dep_time"]: s["dep_time"] = dep_time_str
+                   
+                    if s["status"] == "EN ROUTE" and dist < 100: s["status"] = "APPROACH"
+                   
+                    # Direct API Landing Confirmation
+                    if s["status"] == "APPROACH" and dist < 10:
+                        if on_ground or (alt <= (AIRPORT_ELEV + 100) and gs < 60):
+                            if s["status"] != "LANDED":
+                                s["status"] = "LANDED"
+                                td_time = datetime.now(timezone.utc)
+                                s["touchdown"] = td_time.strftime("%H:%M:%S") + "Z"
+                                s["sort_time"] = td_time.timestamp()
+
+        except Exception as e: print(f"Radar polling error: {e}")
+
+        # Cleanup & AUTO-LAND Interpolation
+        now = time.time()
+        for k in list(strips.keys()):
+            s = strips[k]
+            time_lost = now - s["last_seen"]
+           
+            # If plane was on short approach and signal drops for 60 seconds (Terrain block)
+            if s["status"] == "APPROACH" and s["distance"] < 20 and time_lost > 60:
+                s["status"] = "LANDED"
+                # Assume touchdown happened right after signal loss
+                s["touchdown"] = datetime.now(timezone.utc).strftime("%H:%M:%S") + "Z"
+                s["sort_time"] = time.time()
+                s["last_seen"] = now # Keep it alive on the board for 15 mins
+               
+            elif time_lost > 900: del strips[k]
+           
+        await asyncio.sleep(8)
+
+@app.on_event("startup")
+async def startup_event():
+    # Launches the radar engine independently of website viewers
+    asyncio.create_task(radar_loop())
+
+
+# --- FRONTEND WEB PAGE ---
 html_content = """
 <!DOCTYPE html>
 <html lang="en">
@@ -174,168 +288,68 @@ html_content = """
         setInterval(updateClock, 1000);
         updateClock();
 
-        // DYNAMIC WEBSOCKET CONNECTION (Auto-detects Tunnel URL)
-        const ws_protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-        const ws_url = ws_protocol + "//" + window.location.host + "/ws";
-        const ws = new WebSocket(ws_url);
+        function connectWebSocket() {
+            const ws_protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+            const ws = new WebSocket(ws_protocol + "//" + window.location.host + "/ws");
+           
+            ws.onmessage = (event) => {
+                const flights = JSON.parse(event.data);
+                const container = document.getElementById('board');
+                const rwyDisplay = document.getElementById('rwy-display');
+               
+                if (flights.length > 0 && flights[0].rwy) {
+                    rwyDisplay.innerText = `ACTIVE RUNWAY IN USE: ${flights[0].rwy}`;
+                }
+
+                if (flights.length === 0) {
+                    container.innerHTML = '<p style="text-align: center; color: #fff;">No inbound flights found currently.</p>';
+                    return;
+                }
+
+                container.innerHTML = '';
+               
+                flights.forEach(f => {
+                    const div = document.createElement('div');
+                    let stripClass = "strip";
+                    if (f.status === "APPROACH") stripClass += " approach";
+                    if (f.status === "LANDED") stripClass += " landed";
+                    div.className = stripClass;
+
+                    const block1 = `<div><span class="large-text">${f.callsign}</span><span class="small-text">${f.aircraft} | ${f.speed} kts</span></div>`;
+                    const block2 = `<div><span class="large-text">${f.origin} ✈️ ${f.dest}</span><span class="small-text">${f.dep_time} | ${f.distance} km</span></div>`;
+                    const block3 = `<div><span class="status-text">${f.status}</span></div>`;
+                    const block4 = `<div style="align-items: center;"><span class="small-text">ETA (UTC)</span><span class="large-text eta-box">${f.eta}</span></div>`;
+                    const tdTime = f.touchdown ? f.touchdown : "--:--:--";
+                    const tdColor = f.touchdown ? '#d32f2f' : 'inherit';
+                    const block5 = `<div><span class="small-text">ATA (UTC)</span><span class="large-text" style="color: ${tdColor}; text-align: center;">${tdTime}</span></div>`;
+
+                    div.innerHTML = block1 + block2 + block3 + block4 + block5;
+                    container.appendChild(div);
+                });
+            };
+
+            ws.onerror = () => { document.getElementById('board').innerHTML = '<p style="text-align: center; color: #ff5252; font-weight: bold;">Connection lost. Reconnecting...</p>'; };
+            ws.onclose = () => { setTimeout(connectWebSocket, 3000); };
+        }
        
-        ws.onmessage = (event) => {
-            const flights = JSON.parse(event.data);
-            const container = document.getElementById('board');
-            const rwyDisplay = document.getElementById('rwy-display');
-           
-            if (flights.length > 0 && flights[0].rwy) {
-                rwyDisplay.innerText = `ACTIVE RUNWAY IN USE: ${flights[0].rwy}`;
-            }
-
-            if (flights.length === 0) {
-                container.innerHTML = '<p style="text-align: center; color: #fff;">No inbound flights found currently.</p>';
-                return;
-            }
-
-            container.innerHTML = '';
-           
-            flights.forEach(f => {
-                const div = document.createElement('div');
-                let stripClass = "strip";
-                if (f.status === "APPROACH") stripClass += " approach";
-                if (f.status === "LANDED") stripClass += " landed";
-                div.className = stripClass;
-
-                const block1 = `<div><span class="large-text">${f.callsign}</span><span class="small-text">${f.aircraft} | ${f.speed} kts</span></div>`;
-                const block2 = `<div><span class="large-text">${f.origin} ✈️ ${f.dest}</span><span class="small-text">DEP: ${f.dep_time} | ${f.distance} km</span></div>`;
-                const block3 = `<div><span class="status-text">${f.status}</span></div>`;
-                const block4 = `<div style="align-items: center;"><span class="small-text">ETA (UTC)</span><span class="large-text eta-box">${f.eta}</span></div>`;
-                const tdTime = f.touchdown ? f.touchdown : "--:--:--";
-                const tdColor = f.touchdown ? '#d32f2f' : 'inherit';
-                const block5 = `<div><span class="small-text">ATA (UTC)</span><span class="large-text" style="color: ${tdColor}; text-align: center;">${tdTime}</span></div>`;
-
-                div.innerHTML = block1 + block2 + block3 + block4 + block5;
-                container.appendChild(div);
-            });
-        };
-
-        ws.onerror = () => {
-            document.getElementById('board').innerHTML = '<p style="text-align: center; color: #ff5252; font-weight: bold;">Connection lost. Check server status.</p>';
-        };
+        connectWebSocket();
     </script>
 </body>
 </html>
 """
 
-# Route for rendering the webpage
 @app.get("/")
 async def get_webpage():
     return HTMLResponse(html_content)
 
-# --- 6. WEBSOCKET ENGINE & RADAR LOGIC ---
-strips = {}
-
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
-   
-    while True:
-        update_dynamic_watchlist()
-        rwy_in_use = get_active_runway()
-       
-        try:
-            flights = fr_api.get_flights(bounds=REGION_BOUNDS)
-           
-            for f in flights:
-                if not f.latitude or not f.longitude: continue
-               
-                # Exclusions
-                if f.origin_airport_iata == TARGET_IATA: continue
-                dest_iata = f.destination_airport_iata
-                if dest_iata and dest_iata not in [TARGET_IATA, "N/A", ""]: continue
-
-                dist = distance_to_vocb(f.latitude, f.longitude)
-                alt = f.altitude
-                gs = f.ground_speed
-                on_ground = f.on_ground == 1
-                norm_cs = normalize_callsign(f.callsign)
-               
-                # Inclusions
-                is_cjb_bound = dest_iata == TARGET_IATA
-                is_auto_expected = norm_cs in DYNAMIC_WATCHLIST
-                is_manual_expected = norm_cs in NORMALIZED_MANUAL_LIST
-                is_in_airspace = (dist < 100) and (alt < 15000)
-
-                if not (is_cjb_bound or is_auto_expected or is_manual_expected or is_in_airspace): continue
-
-                icao_id = f.id
-                dep_time_str = DYNAMIC_WATCHLIST.get(norm_cs, "--:--Z")
-               
-                # Advanced 3D ETA Calculation
-                eta_str = "--:--"
-                eta_unix = float('inf')
-               
-                if gs > 50 and not on_ground:
-                    bearing = calculate_bearing(f.latitude, f.longitude, VOCB_LAT, VOCB_LON)
-                    rwy_heading = 233 if rwy_in_use == "23" else 53
-                    angle_diff = abs((bearing - rwy_heading + 180) % 360 - 180)
-                    lateral_miles = dist + 40 if angle_diff > 90 else dist + 15
-                   
-                    alt_to_lose = max(0, alt - AIRPORT_ELEV)
-                    required_descent_dist_km = (alt_to_lose / 1000) * 3 * 1.852
-                    true_track_distance = max(lateral_miles, required_descent_dist_km)
-                   
-                    if alt < 5000: phase_speed = 260
-                    elif alt < 10000: phase_speed = 450
-                    elif alt < 20000: phase_speed = 550
-                    else: phase_speed = 750
-                       
-                    blended_speed_kmh = (gs * 1.852 * 0.4) + (phase_speed * 0.6)
-                    hours_remaining = true_track_distance / max(blended_speed_kmh, 250)
-                   
-                    eta_time = datetime.now(timezone.utc) + timedelta(hours=hours_remaining)
-                    eta_str = eta_time.strftime("%H:%M") + "Z"
-                    eta_unix = eta_time.timestamp()
-
-                # Memory Updates
-                if icao_id not in strips and not on_ground:
-                    strips[icao_id] = {
-                        "callsign": norm_cs, "origin": get_icao_airport(f.origin_airport_iata) if f.origin_airport_iata else "UNK",
-                        "dest": "VOCB", "aircraft": f.aircraft_code if f.aircraft_code else "UNK", "speed": gs,
-                        "status": "EN ROUTE", "dep_time": dep_time_str, "eta": eta_str, "sort_time": eta_unix,
-                        "touchdown": None, "last_seen": time.time(), "distance": int(dist)
-                    }
-
-                if icao_id in strips:
-                    s = strips[icao_id]
-                    s["last_seen"] = time.time()
-                    s["distance"] = int(dist)
-                    s["speed"] = gs
-                   
-                    if s["status"] != "LANDED":
-                        s["eta"] = eta_str
-                        s["sort_time"] = eta_unix
-                       
-                    if s["dep_time"] == "--:--Z": s["dep_time"] = dep_time_str
-                   
-                    if s["status"] == "EN ROUTE" and dist < 100: s["status"] = "APPROACH"
-                    if s["status"] == "APPROACH" and dist < 10:
-                        if on_ground or (alt <= (AIRPORT_ELEV + 100) and gs < 60):
-                            if s["status"] != "LANDED":
-                                s["status"] = "LANDED"
-                                td_time = datetime.now(timezone.utc)
-                                s["touchdown"] = td_time.strftime("%H:%M:%S") + "Z"
-                                s["sort_time"] = td_time.timestamp()
-
-        except Exception as e: print(f"Radar polling error: {e}")
-
-        # Cleanup & Render
-        now = time.time()
-        for k in list(strips.keys()):
-            if now - strips[k]["last_seen"] > 900: del strips[k]
-       
-        current_strips = [{"icao": k, "rwy": rwy_in_use, **v} for k, v in strips.items()]
-        current_strips.sort(key=lambda x: x["sort_time"])
-       
-        await websocket.send_json(current_strips)
-        await asyncio.sleep(8)
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    try:
+        while True:
+            current_strips = [{"icao": k, "rwy": ACTIVE_RUNWAY, **v} for k, v in strips.items()]
+            current_strips.sort(key=lambda x: x["sort_time"])
+            await websocket.send_json(current_strips)
+            await asyncio.sleep(8)
+    except Exception:
+        pass
