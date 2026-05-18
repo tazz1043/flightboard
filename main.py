@@ -26,6 +26,16 @@ LAST_SCHEDULE_FETCH = 0
 NORMALIZED_MANUAL_LIST = set()
 strips = {}
 
+# GPS Coordinates of Common Origins to Calculate Physics-Based ATD
+ORIGIN_COORDS = {
+    "DEL": (28.5562, 77.1000), "MAA": (12.9941, 80.1709),
+    "BLR": (13.1986, 77.7066), "BOM": (19.0900, 72.8680),
+    "HYD": (17.2403, 78.4294), "SIN": (1.3644, 103.9915),
+    "SHJ": (25.3286, 55.5172), "PNQ": (18.5822, 73.9197),
+    "COK": (10.1520, 76.3930), "AUH": (24.4330, 54.6511),
+    "DXB": (25.2532, 55.3657), "CJB": (11.0300, 77.0434)
+}
+
 def get_active_runway():
     global ACTIVE_RUNWAY, LAST_METAR_FETCH
     if time.time() - LAST_METAR_FETCH < 1800:
@@ -47,6 +57,13 @@ def get_active_runway():
     except Exception: pass
     LAST_METAR_FETCH = time.time()
     return ACTIVE_RUNWAY
+
+def get_distance(lat1, lon1, lat2, lon2):
+    """Calculates real-world distance between two GPS points."""
+    R = 6371
+    dlat, dlon = math.radians(lat2 - lat1), math.radians(lon2 - lon1)
+    a = math.sin(dlat/2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon/2)**2
+    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
 
 def calculate_bearing(lat1, lon1, lat2, lon2):
     dLon = math.radians(lon2 - lon1)
@@ -78,12 +95,6 @@ def normalize_callsign(callsign):
     return callsign
 
 def get_icao_airport(iata): return AIRPORT_MAP.get(iata, iata)
-
-def distance_to_vocb(lat, lon):
-    R = 6371
-    dlat, dlon = math.radians(VOCB_LAT - lat), math.radians(VOCB_LON - lon)
-    a = math.sin(dlat/2)**2 + math.cos(math.radians(lat)) * math.cos(math.radians(VOCB_LAT)) * math.sin(dlon/2)**2
-    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
 
 def update_dynamic_watchlist():
     global DYNAMIC_WATCHLIST, LAST_SCHEDULE_FETCH
@@ -165,29 +176,25 @@ async def radar_loop():
                 f_num = getattr(f, 'number', '')
                 f_num = f_num.strip().upper().replace(" ", "") if f_num else ""
                
-                if f.origin_airport_iata == TARGET_IATA: continue
                 dest_iata = f.destination_airport_iata
-                if dest_iata and dest_iata not in [TARGET_IATA, "N/A", ""]: continue
-
-                dist = distance_to_vocb(f.latitude, f.longitude)
+                dist = get_distance(f.latitude, f.longitude, VOCB_LAT, VOCB_LON)
                 alt = f.altitude
                 gs = f.ground_speed
                 v_speed = f.vertical_speed if f.vertical_speed is not None else 0
                 on_ground = f.on_ground == 1
                
-                # --- NEW: GENERAL AVIATION DEPARTURE FILTER ---
-                # If a plane is close to the airport, climbing fast (>250 fpm), isn't already tracked in memory,
-                # and doesn't explicitly have CJB as its destination, it is taking off! Ignore it.
+                # General Aviation Departure Filter
                 if dist < 60 and v_speed > 250 and icao_id not in strips and dest_iata != TARGET_IATA:
                     continue
-                # ----------------------------------------------
                
+                is_already_tracked = icao_id in strips
                 is_cjb_bound = dest_iata == TARGET_IATA
                 is_auto_expected = (norm_cs in DYNAMIC_WATCHLIST) or (f_num in DYNAMIC_WATCHLIST)
                 is_manual_expected = norm_cs in NORMALIZED_MANUAL_LIST
-                is_in_airspace = (dist < 100) and (alt < 20000)
-
-                if not (is_cjb_bound or is_auto_expected or is_manual_expected or is_in_airspace): continue
+                is_unannounced_arrival = (dest_iata in ["", "N/A"]) and (dist < 75) and (alt < 15000) and (v_speed < -150)
+               
+                if not (is_already_tracked or is_cjb_bound or is_auto_expected or is_manual_expected or is_unannounced_arrival):
+                    continue
 
                 current_watchlist_dep = DYNAMIC_WATCHLIST.get(norm_cs) or DYNAMIC_WATCHLIST.get(f_num) or "DEP: --:--"
                
@@ -198,16 +205,22 @@ async def radar_loop():
                     bearing = calculate_bearing(f.latitude, f.longitude, VOCB_LAT, VOCB_LON)
                     rwy_heading = 233 if rwy_in_use == "23" else 53
                     angle_diff = abs((bearing - rwy_heading + 180) % 360 - 180)
-                    lateral_miles = dist + 40 if angle_diff > 90 else dist + 15
                     alt_to_lose = max(0, alt - AIRPORT_ELEV)
                    
-                    if dist <= 55.56:
+                    if dist <= 25:
+                        speed_kmh = max(gs * 1.852, 220)
+                        hours_remaining = dist / speed_kmh
+                       
+                    elif dist <= 55.56:
                         mins_to_descend = alt_to_lose / 1000.0
                         hours_vertical = mins_to_descend / 60.0
                         speed_kmh = max(gs * 1.852, 220)
+                        lateral_miles = dist + 15 if angle_diff > 90 else dist + 5
                         hours_lateral = lateral_miles / speed_kmh
                         hours_remaining = max(hours_vertical, hours_lateral)
+                       
                     else:
+                        lateral_miles = dist + 40 if angle_diff > 90 else dist + 15
                         required_descent_dist_km = (alt_to_lose / 1000) * 3 * 1.852
                         true_track_distance = max(lateral_miles, required_descent_dist_km)
                        
@@ -229,9 +242,23 @@ async def radar_loop():
                     if dist < 10 and alt <= AIRPORT_ELEV + 1000: init_status = "LANDED"
                    
                     final_dep_str = current_watchlist_dep
-                    deep_dep = get_deep_atd(f.id)
-                    if deep_dep:
-                        final_dep_str = deep_dep
+                   
+                    # --- THE PHYSICS ATD ENGINE ---
+                    if "ATD" not in final_dep_str:
+                        deep_dep = get_deep_atd(f.id)
+                        if deep_dep:
+                            final_dep_str = deep_dep
+                        else:
+                            # CLOUDFLARE FALLBACK: Reverse-engineer the ATD using spatial physics!
+                            origin_iata = f.origin_airport_iata
+                            if origin_iata in ORIGIN_COORDS:
+                                o_lat, o_lon = ORIGIN_COORDS[origin_iata]
+                                dist_flown = get_distance(o_lat, o_lon, f.latitude, f.longitude)
+                                # Divide distance flown by average climb/cruise speed (650 km/h)
+                                hours_flown = dist_flown / 650.0
+                                atd_time = datetime.now(timezone.utc) - timedelta(hours=hours_flown)
+                                final_dep_str = "ATD: " + atd_time.strftime("%H:%M")
+                    # ------------------------------
 
                     strips[icao_id] = {
                         "callsign": norm_cs, "origin": get_icao_airport(f.origin_airport_iata) if f.origin_airport_iata else "UNK",
@@ -251,10 +278,19 @@ async def radar_loop():
                         s["eta"] = eta_str
                         s["sort_time"] = eta_unix
                        
+                    # Maintain Physics Engine Updates if API remains blocked
                     if "ATD" not in s["dep_time"] and (now - s.get("last_dep_check", 0) > 240):
                         deep_dep = get_deep_atd(f.id)
                         if deep_dep:
                             s["dep_time"] = deep_dep
+                        else:
+                            origin_iata = f.origin_airport_iata
+                            if origin_iata in ORIGIN_COORDS:
+                                o_lat, o_lon = ORIGIN_COORDS[origin_iata]
+                                dist_flown = get_distance(o_lat, o_lon, f.latitude, f.longitude)
+                                hours_flown = dist_flown / 650.0
+                                atd_time = datetime.now(timezone.utc) - timedelta(hours=hours_flown)
+                                s["dep_time"] = "ATD: " + atd_time.strftime("%H:%M")
                         s["last_dep_check"] = now
                    
                     if s["status"] == "EN ROUTE" and dist < 100: s["status"] = "APPROACH"
