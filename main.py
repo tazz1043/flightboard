@@ -71,6 +71,8 @@ AIRPORT_MAP = {
 def normalize_callsign(callsign):
     if not callsign: return "UNK"
     callsign = callsign.strip().upper()
+    if callsign.startswith(tuple(AIRLINE_MAP.values())):
+        return callsign
     for iata, icao in AIRLINE_MAP.items():
         if callsign.startswith(iata): return callsign.replace(iata, icao, 1)
     return callsign
@@ -105,7 +107,6 @@ def update_dynamic_watchlist():
                     real_dep = times.get("real", {}).get("departure")
                     sch_dep = times.get("scheduled", {}).get("departure")
                    
-                    # ATD vs STD Logic
                     if real_dep:
                         dep_str = "ATD: " + datetime.fromtimestamp(real_dep, timezone.utc).strftime("%H:%M") + "Z"
                     elif sch_dep:
@@ -131,6 +132,10 @@ async def radar_loop():
            
             for f in flights:
                 if not f.latitude or not f.longitude: continue
+               
+                norm_cs = normalize_callsign(f.callsign)
+                if norm_cs.startswith("IFC"): continue # Air Force Exclusion
+               
                 if f.origin_airport_iata == TARGET_IATA: continue
                 dest_iata = f.destination_airport_iata
                 if dest_iata and dest_iata not in [TARGET_IATA, "N/A", ""]: continue
@@ -139,13 +144,10 @@ async def radar_loop():
                 alt = f.altitude
                 gs = f.ground_speed
                 on_ground = f.on_ground == 1
-                norm_cs = normalize_callsign(f.callsign)
                
                 is_cjb_bound = dest_iata == TARGET_IATA
                 is_auto_expected = norm_cs in DYNAMIC_WATCHLIST
                 is_manual_expected = norm_cs in NORMALIZED_MANUAL_LIST
-               
-                # Expanded Catch-all for Cold Starts (Catches planes at 25NM/20,000ft)
                 is_in_airspace = (dist < 100) and (alt < 20000)
 
                 if not (is_cjb_bound or is_auto_expected or is_manual_expected or is_in_airspace): continue
@@ -178,16 +180,30 @@ async def radar_loop():
                     eta_str = eta_time.strftime("%H:%M") + "Z"
                     eta_unix = eta_time.timestamp()
 
-                # Memory Updates & Cold Start Initialization Fix
                 if icao_id not in strips and not on_ground:
                     init_status = "EN ROUTE"
                     if dist < 100: init_status = "APPROACH"
                     if dist < 10 and alt <= AIRPORT_ELEV + 1000: init_status = "LANDED"
                    
+                    # --- DEEP ID INTERCEPTION (Airborne Time Fix) ---
+                    exact_dep_str = dep_time_str
+                    try:
+                        details = fr_api.get_flight_details(f.id)
+                        if details and isinstance(details, dict):
+                            real_dep = details.get("time", {}).get("real", {}).get("departure")
+                            if real_dep:
+                                exact_dep_str = "ATD: " + datetime.fromtimestamp(real_dep, timezone.utc).strftime("%H:%M") + "Z"
+                            elif "DEP: --" in exact_dep_str:
+                                sch_dep = details.get("time", {}).get("scheduled", {}).get("departure")
+                                if sch_dep:
+                                    exact_dep_str = "STD: " + datetime.fromtimestamp(sch_dep, timezone.utc).strftime("%H:%M") + "Z"
+                    except Exception: pass
+                    # ------------------------------------------------
+
                     strips[icao_id] = {
                         "callsign": norm_cs, "origin": get_icao_airport(f.origin_airport_iata) if f.origin_airport_iata else "UNK",
                         "dest": "VOCB", "aircraft": f.aircraft_code if f.aircraft_code else "UNK", "speed": gs,
-                        "status": init_status, "dep_time": dep_time_str, "eta": eta_str, "sort_time": eta_unix,
+                        "status": init_status, "dep_time": exact_dep_str, "eta": eta_str, "sort_time": eta_unix,
                         "touchdown": None, "last_seen": now, "distance": int(dist)
                     }
 
@@ -201,11 +217,12 @@ async def radar_loop():
                         s["eta"] = eta_str
                         s["sort_time"] = eta_unix
                        
-                    if "DEP: --" in s["dep_time"]: s["dep_time"] = dep_time_str
+                    # If it was still missing, try pulling from the schedule payload fallback
+                    if "DEP: --" in s["dep_time"] and "DEP: --" not in dep_time_str:
+                        s["dep_time"] = dep_time_str
                    
                     if s["status"] == "EN ROUTE" and dist < 100: s["status"] = "APPROACH"
                    
-                    # Direct API Landing Confirmation
                     if s["status"] == "APPROACH" and dist < 10:
                         if on_ground or (alt <= (AIRPORT_ELEV + 100) and gs < 60):
                             if s["status"] != "LANDED":
@@ -216,19 +233,16 @@ async def radar_loop():
 
         except Exception as e: print(f"Radar polling error: {e}")
 
-        # Cleanup & AUTO-LAND Interpolation
         now = time.time()
         for k in list(strips.keys()):
             s = strips[k]
             time_lost = now - s["last_seen"]
            
-            # If plane was on short approach and signal drops for 60 seconds (Terrain block)
             if s["status"] == "APPROACH" and s["distance"] < 20 and time_lost > 60:
                 s["status"] = "LANDED"
-                # Assume touchdown happened right after signal loss
                 s["touchdown"] = datetime.now(timezone.utc).strftime("%H:%M:%S") + "Z"
                 s["sort_time"] = time.time()
-                s["last_seen"] = now # Keep it alive on the board for 15 mins
+                s["last_seen"] = now
                
             elif time_lost > 900: del strips[k]
            
@@ -236,7 +250,6 @@ async def radar_loop():
 
 @app.on_event("startup")
 async def startup_event():
-    # Launches the radar engine independently of website viewers
     asyncio.create_task(radar_loop())
 
 
