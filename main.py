@@ -109,11 +109,11 @@ def update_dynamic_watchlist():
                 sch_dep = times.get("scheduled", {}).get("departure")
                
                 if real_dep:
-                    dep_str = "ATD: " + datetime.fromtimestamp(real_dep, timezone.utc).strftime("%H:%M") + "Z"
+                    dep_str = "ATD: " + datetime.fromtimestamp(real_dep, timezone.utc).strftime("%H:%M")
                 elif sch_dep:
-                    dep_str = "STD: " + datetime.fromtimestamp(sch_dep, timezone.utc).strftime("%H:%M") + "Z"
+                    dep_str = "STD: " + datetime.fromtimestamp(sch_dep, timezone.utc).strftime("%H:%M")
                 else:
-                    dep_str = "DEP: --:--Z"
+                    dep_str = "DEP: --:--"
                    
                 if cs_raw:
                     new_dict[normalize_callsign(cs_raw)] = dep_str
@@ -167,7 +167,7 @@ async def radar_loop():
                 if not (is_cjb_bound or is_auto_expected or is_manual_expected or is_in_airspace): continue
 
                 icao_id = f.id
-                dep_time_str = DYNAMIC_WATCHLIST.get(norm_cs) or DYNAMIC_WATCHLIST.get(f_num) or "DEP: --:--Z"
+                dep_time_str = DYNAMIC_WATCHLIST.get(norm_cs) or DYNAMIC_WATCHLIST.get(f_num) or "DEP: --:--"
                
                 eta_str = "--:--"
                 eta_unix = float('inf')
@@ -199,7 +199,7 @@ async def radar_loop():
                         hours_remaining = true_track_distance / max(blended_speed_kmh, 250)
                    
                     eta_time = datetime.now(timezone.utc) + timedelta(hours=hours_remaining)
-                    eta_str = eta_time.strftime("%H:%M") + "Z"
+                    eta_str = eta_time.strftime("%H:%M")
                     eta_unix = eta_time.timestamp()
 
                 if icao_id not in strips and not on_ground:
@@ -207,12 +207,26 @@ async def radar_loop():
                     if dist < 100: init_status = "APPROACH"
                     if dist < 10 and alt <= AIRPORT_ELEV + 1000: init_status = "LANDED"
                    
+                    exact_dep_str = dep_time_str
+                    if "DEP: --" in exact_dep_str:
+                        try:
+                            details = fr_api.get_flight_details(f.id)
+                            if details and isinstance(details, dict):
+                                real_dep = details.get("time", {}).get("real", {}).get("departure")
+                                if real_dep:
+                                    exact_dep_str = "ATD: " + datetime.fromtimestamp(real_dep, timezone.utc).strftime("%H:%M")
+                                else:
+                                    sch_dep = details.get("time", {}).get("scheduled", {}).get("departure")
+                                    if sch_dep:
+                                        exact_dep_str = "STD: " + datetime.fromtimestamp(sch_dep, timezone.utc).strftime("%H:%M")
+                        except Exception: pass
+
                     strips[icao_id] = {
                         "callsign": norm_cs, "origin": get_icao_airport(f.origin_airport_iata) if f.origin_airport_iata else "UNK",
                         "dest": "VOCB", "aircraft": f.aircraft_code if f.aircraft_code else "UNK", "speed": gs,
-                        "status": init_status, "dep_time": dep_time_str, "eta": eta_str, "sort_time": eta_unix,
+                        "status": init_status, "dep_time": exact_dep_str, "eta": eta_str, "sort_time": eta_unix,
                         "touchdown": None, "last_seen": now, "distance": int(dist),
-                        "last_dep_check": 0 # NEW: Initialize the check timer
+                        "last_dep_check": 0
                     }
 
                 if icao_id in strips:
@@ -225,22 +239,21 @@ async def radar_loop():
                         s["eta"] = eta_str
                         s["sort_time"] = eta_unix
                        
-                    # --- NEW: ACTIVE ATD UPGRADER ---
-                    # If we don't have ATD, force a live API ping every 3 minutes (180 seconds)
+                    # --- ACTIVE ATD UPGRADER ---
                     if "ATD" not in s["dep_time"] and (now - s.get("last_dep_check", 0) > 180):
                         try:
                             details = fr_api.get_flight_details(f.id)
                             if details and isinstance(details, dict):
                                 real_dep = details.get("time", {}).get("real", {}).get("departure")
                                 if real_dep:
-                                    s["dep_time"] = "ATD: " + datetime.fromtimestamp(real_dep, timezone.utc).strftime("%H:%M") + "Z"
+                                    s["dep_time"] = "ATD: " + datetime.fromtimestamp(real_dep, timezone.utc).strftime("%H:%M")
                                 else:
                                     sch_dep = details.get("time", {}).get("scheduled", {}).get("departure")
                                     if sch_dep and "STD" not in s["dep_time"]:
-                                        s["dep_time"] = "STD: " + datetime.fromtimestamp(sch_dep, timezone.utc).strftime("%H:%M") + "Z"
+                                        s["dep_time"] = "STD: " + datetime.fromtimestamp(sch_dep, timezone.utc).strftime("%H:%M")
                             s["last_dep_check"] = now
                         except Exception:
-                            s["last_dep_check"] = now # Prevent spamming API on failures
+                            s["last_dep_check"] = now
                     # --------------------------------
                    
                     if s["status"] == "EN ROUTE" and dist < 100: s["status"] = "APPROACH"
@@ -250,7 +263,7 @@ async def radar_loop():
                             if s["status"] != "LANDED":
                                 s["status"] = "LANDED"
                                 td_time = datetime.now(timezone.utc)
-                                s["touchdown"] = td_time.strftime("%H:%M:%S") + "Z"
+                                s["touchdown"] = td_time.strftime("%H:%M:%S")
                                 s["sort_time"] = td_time.timestamp()
 
         except Exception as e: print(f"Radar polling error: {e}")
@@ -262,7 +275,7 @@ async def radar_loop():
            
             if s["status"] == "APPROACH" and s["distance"] < 20 and time_lost > 60:
                 s["status"] = "LANDED"
-                s["touchdown"] = datetime.now(timezone.utc).strftime("%H:%M:%S") + "Z"
+                s["touchdown"] = datetime.now(timezone.utc).strftime("%H:%M:%S")
                 s["sort_time"] = time.time()
                 s["last_seen"] = now
                
@@ -306,7 +319,7 @@ html_content = """
     <div class="header-container">
         <h1 id="main-title">✈️ COIMBATORE TOWER (VOCB)</h1>
         <div id="rwy-display" class="rwy-header">FETCHING ACTIVE RUNWAY...</div>
-        <div id="clock" class="utc-clock">00:00:00Z</div>
+        <div id="clock" class="utc-clock">00:00:00</div>
     </div>
     <div id="board" class="board">
         <p style="text-align: center; color: #fff;">Connecting to radar... calculating ETA vectors.</p>
@@ -318,7 +331,7 @@ html_content = """
             const hours = String(now.getUTCHours()).padStart(2, '0');
             const minutes = String(now.getUTCMinutes()).padStart(2, '0');
             const seconds = String(now.getUTCSeconds()).padStart(2, '0');
-            document.getElementById('clock').innerText = `${hours}:${minutes}:${seconds}Z`;
+            document.getElementById('clock').innerText = `${hours}:${minutes}:${seconds}`;
         }
         setInterval(updateClock, 1000);
         updateClock();
