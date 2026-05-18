@@ -141,14 +141,11 @@ async def radar_loop():
                 norm_cs = normalize_callsign(f.callsign)
                 aircraft_type = f.aircraft_code.upper() if f.aircraft_code else ""
                
-                # --- AGGRESSIVE MILITARY EXCLUSION ---
-                # Blocks IAF formal codes, Tactical Callsigns (Sulur AFB), and military jet types
                 TACTICAL_CALLSIGNS = ("IFC", "RAVEN", "SARANG", "TEJAS", "IAF", "VAYU", "SULUR", "DEF", "K1", "K2", "CHETAK")
                 MILITARY_AIRCRAFT = ("SU30", "LCA", "AN32", "IL76", "C17", "C130", "HAWK", "D228")
                
                 if norm_cs.startswith(TACTICAL_CALLSIGNS) or aircraft_type.startswith(MILITARY_AIRCRAFT):
                     continue
-                # -------------------------------------
                
                 f_num = getattr(f, 'number', '')
                 f_num = f_num.strip().upper().replace(" ", "") if f_num else ""
@@ -182,16 +179,33 @@ async def radar_loop():
                     lateral_miles = dist + 40 if angle_diff > 90 else dist + 15
                    
                     alt_to_lose = max(0, alt - AIRPORT_ELEV)
-                    required_descent_dist_km = (alt_to_lose / 1000) * 3 * 1.852
-                    true_track_distance = max(lateral_miles, required_descent_dist_km)
                    
-                    if alt < 5000: phase_speed = 260
-                    elif alt < 10000: phase_speed = 450
-                    elif alt < 20000: phase_speed = 550
-                    else: phase_speed = 750
+                    # --- NEW 30 NM (55.5 km) TERMINAL DESCENT LOGIC ---
+                    if dist <= 55.56:
+                        # 1. Calculate time to lose altitude strictly at 1000 feet per minute
+                        mins_to_descend = alt_to_lose / 1000.0
+                        hours_vertical = mins_to_descend / 60.0
                        
-                    blended_speed_kmh = (gs * 1.852 * 0.4) + (phase_speed * 0.6)
-                    hours_remaining = true_track_distance / max(blended_speed_kmh, 250)
+                        # 2. Calculate time to cover lateral track (at approach speeds)
+                        speed_kmh = max(gs * 1.852, 220) # Minimum 220 kmh (~120 knots) on approach
+                        hours_lateral = lateral_miles / speed_kmh
+                       
+                        # 3. Whichever takes longer dictates the ETA
+                        hours_remaining = max(hours_vertical, hours_lateral)
+                       
+                    else:
+                        # Standard En Route 3D Profile
+                        required_descent_dist_km = (alt_to_lose / 1000) * 3 * 1.852
+                        true_track_distance = max(lateral_miles, required_descent_dist_km)
+                       
+                        if alt < 5000: phase_speed = 260
+                        elif alt < 10000: phase_speed = 450
+                        elif alt < 20000: phase_speed = 550
+                        else: phase_speed = 750
+                           
+                        blended_speed_kmh = (gs * 1.852 * 0.4) + (phase_speed * 0.6)
+                        hours_remaining = true_track_distance / max(blended_speed_kmh, 250)
+                    # ----------------------------------------------------
                    
                     eta_time = datetime.now(timezone.utc) + timedelta(hours=hours_remaining)
                     eta_str = eta_time.strftime("%H:%M") + "Z"
