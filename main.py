@@ -100,21 +100,28 @@ def update_dynamic_watchlist():
             new_dict = {}
             for entry in arrivals:
                 f_info = entry.get("flight", {})
+               
+                # FIX: Extract BOTH callsign and passenger flight number
                 cs_raw = f_info.get("identification", {}).get("callsign")
-                if cs_raw:
-                    norm_cs = normalize_callsign(cs_raw)
-                    times = f_info.get("time", {})
-                    real_dep = times.get("real", {}).get("departure")
-                    sch_dep = times.get("scheduled", {}).get("departure")
+                num_raw = f_info.get("identification", {}).get("number", {}).get("default")
+               
+                times = f_info.get("time", {})
+                real_dep = times.get("real", {}).get("departure")
+                sch_dep = times.get("scheduled", {}).get("departure")
+               
+                if real_dep:
+                    dep_str = "ATD: " + datetime.fromtimestamp(real_dep, timezone.utc).strftime("%H:%M") + "Z"
+                elif sch_dep:
+                    dep_str = "STD: " + datetime.fromtimestamp(sch_dep, timezone.utc).strftime("%H:%M") + "Z"
+                else:
+                    dep_str = "DEP: --:--Z"
                    
-                    if real_dep:
-                        dep_str = "ATD: " + datetime.fromtimestamp(real_dep, timezone.utc).strftime("%H:%M") + "Z"
-                    elif sch_dep:
-                        dep_str = "STD: " + datetime.fromtimestamp(sch_dep, timezone.utc).strftime("%H:%M") + "Z"
-                    else:
-                        dep_str = "DEP: --:--Z"
-                       
-                    new_dict[norm_cs] = dep_str
+                # Map BOTH the callsign and the flight number to the same departure time
+                if cs_raw:
+                    new_dict[normalize_callsign(cs_raw)] = dep_str
+                if num_raw:
+                    new_dict[num_raw.strip().upper().replace(" ", "")] = dep_str
+                   
             if new_dict: DYNAMIC_WATCHLIST = new_dict
     except Exception: pass
     LAST_SCHEDULE_FETCH = time.time()
@@ -134,7 +141,11 @@ async def radar_loop():
                 if not f.latitude or not f.longitude: continue
                
                 norm_cs = normalize_callsign(f.callsign)
-                if norm_cs.startswith("IFC"): continue # Air Force Exclusion
+                if norm_cs.startswith("IFC"): continue
+               
+                # Safely extract flight number (e.g., AI543) to cross-reference
+                f_num = getattr(f, 'number', '')
+                f_num = f_num.strip().upper().replace(" ", "") if f_num else ""
                
                 if f.origin_airport_iata == TARGET_IATA: continue
                 dest_iata = f.destination_airport_iata
@@ -146,14 +157,17 @@ async def radar_loop():
                 on_ground = f.on_ground == 1
                
                 is_cjb_bound = dest_iata == TARGET_IATA
-                is_auto_expected = norm_cs in DYNAMIC_WATCHLIST
+                # Check if EITHER the callsign OR the flight number is expected
+                is_auto_expected = (norm_cs in DYNAMIC_WATCHLIST) or (f_num in DYNAMIC_WATCHLIST)
                 is_manual_expected = norm_cs in NORMALIZED_MANUAL_LIST
                 is_in_airspace = (dist < 100) and (alt < 20000)
 
                 if not (is_cjb_bound or is_auto_expected or is_manual_expected or is_in_airspace): continue
 
                 icao_id = f.id
-                dep_time_str = DYNAMIC_WATCHLIST.get(norm_cs, "DEP: --:--Z")
+               
+                # Fetch departure time using either the Callsign OR the Flight Number
+                dep_time_str = DYNAMIC_WATCHLIST.get(norm_cs) or DYNAMIC_WATCHLIST.get(f_num) or "DEP: --:--Z"
                
                 eta_str = "--:--"
                 eta_unix = float('inf')
@@ -185,20 +199,20 @@ async def radar_loop():
                     if dist < 100: init_status = "APPROACH"
                     if dist < 10 and alt <= AIRPORT_ELEV + 1000: init_status = "LANDED"
                    
-                    # --- DEEP ID INTERCEPTION (Airborne Time Fix) ---
+                    # Deep API Interception as the absolute final fallback
                     exact_dep_str = dep_time_str
-                    try:
-                        details = fr_api.get_flight_details(f.id)
-                        if details and isinstance(details, dict):
-                            real_dep = details.get("time", {}).get("real", {}).get("departure")
-                            if real_dep:
-                                exact_dep_str = "ATD: " + datetime.fromtimestamp(real_dep, timezone.utc).strftime("%H:%M") + "Z"
-                            elif "DEP: --" in exact_dep_str:
-                                sch_dep = details.get("time", {}).get("scheduled", {}).get("departure")
-                                if sch_dep:
-                                    exact_dep_str = "STD: " + datetime.fromtimestamp(sch_dep, timezone.utc).strftime("%H:%M") + "Z"
-                    except Exception: pass
-                    # ------------------------------------------------
+                    if "DEP: --" in exact_dep_str:
+                        try:
+                            details = fr_api.get_flight_details(f.id)
+                            if details and isinstance(details, dict):
+                                real_dep = details.get("time", {}).get("real", {}).get("departure")
+                                if real_dep:
+                                    exact_dep_str = "ATD: " + datetime.fromtimestamp(real_dep, timezone.utc).strftime("%H:%M") + "Z"
+                                else:
+                                    sch_dep = details.get("time", {}).get("scheduled", {}).get("departure")
+                                    if sch_dep:
+                                        exact_dep_str = "STD: " + datetime.fromtimestamp(sch_dep, timezone.utc).strftime("%H:%M") + "Z"
+                        except Exception: pass
 
                     strips[icao_id] = {
                         "callsign": norm_cs, "origin": get_icao_airport(f.origin_airport_iata) if f.origin_airport_iata else "UNK",
@@ -217,7 +231,6 @@ async def radar_loop():
                         s["eta"] = eta_str
                         s["sort_time"] = eta_unix
                        
-                    # If it was still missing, try pulling from the schedule payload fallback
                     if "DEP: --" in s["dep_time"] and "DEP: --" not in dep_time_str:
                         s["dep_time"] = dep_time_str
                    
