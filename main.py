@@ -180,21 +180,13 @@ async def radar_loop():
                    
                     alt_to_lose = max(0, alt - AIRPORT_ELEV)
                    
-                    # --- NEW 30 NM (55.5 km) TERMINAL DESCENT LOGIC ---
                     if dist <= 55.56:
-                        # 1. Calculate time to lose altitude strictly at 1000 feet per minute
                         mins_to_descend = alt_to_lose / 1000.0
                         hours_vertical = mins_to_descend / 60.0
-                       
-                        # 2. Calculate time to cover lateral track (at approach speeds)
-                        speed_kmh = max(gs * 1.852, 220) # Minimum 220 kmh (~120 knots) on approach
+                        speed_kmh = max(gs * 1.852, 220)
                         hours_lateral = lateral_miles / speed_kmh
-                       
-                        # 3. Whichever takes longer dictates the ETA
                         hours_remaining = max(hours_vertical, hours_lateral)
-                       
                     else:
-                        # Standard En Route 3D Profile
                         required_descent_dist_km = (alt_to_lose / 1000) * 3 * 1.852
                         true_track_distance = max(lateral_miles, required_descent_dist_km)
                        
@@ -205,7 +197,6 @@ async def radar_loop():
                            
                         blended_speed_kmh = (gs * 1.852 * 0.4) + (phase_speed * 0.6)
                         hours_remaining = true_track_distance / max(blended_speed_kmh, 250)
-                    # ----------------------------------------------------
                    
                     eta_time = datetime.now(timezone.utc) + timedelta(hours=hours_remaining)
                     eta_str = eta_time.strftime("%H:%M") + "Z"
@@ -216,25 +207,12 @@ async def radar_loop():
                     if dist < 100: init_status = "APPROACH"
                     if dist < 10 and alt <= AIRPORT_ELEV + 1000: init_status = "LANDED"
                    
-                    exact_dep_str = dep_time_str
-                    if "DEP: --" in exact_dep_str:
-                        try:
-                            details = fr_api.get_flight_details(f.id)
-                            if details and isinstance(details, dict):
-                                real_dep = details.get("time", {}).get("real", {}).get("departure")
-                                if real_dep:
-                                    exact_dep_str = "ATD: " + datetime.fromtimestamp(real_dep, timezone.utc).strftime("%H:%M") + "Z"
-                                else:
-                                    sch_dep = details.get("time", {}).get("scheduled", {}).get("departure")
-                                    if sch_dep:
-                                        exact_dep_str = "STD: " + datetime.fromtimestamp(sch_dep, timezone.utc).strftime("%H:%M") + "Z"
-                        except Exception: pass
-
                     strips[icao_id] = {
                         "callsign": norm_cs, "origin": get_icao_airport(f.origin_airport_iata) if f.origin_airport_iata else "UNK",
                         "dest": "VOCB", "aircraft": f.aircraft_code if f.aircraft_code else "UNK", "speed": gs,
-                        "status": init_status, "dep_time": exact_dep_str, "eta": eta_str, "sort_time": eta_unix,
-                        "touchdown": None, "last_seen": now, "distance": int(dist)
+                        "status": init_status, "dep_time": dep_time_str, "eta": eta_str, "sort_time": eta_unix,
+                        "touchdown": None, "last_seen": now, "distance": int(dist),
+                        "last_dep_check": 0 # NEW: Initialize the check timer
                     }
 
                 if icao_id in strips:
@@ -247,8 +225,23 @@ async def radar_loop():
                         s["eta"] = eta_str
                         s["sort_time"] = eta_unix
                        
-                    if "DEP: --" in s["dep_time"] and "DEP: --" not in dep_time_str:
-                        s["dep_time"] = dep_time_str
+                    # --- NEW: ACTIVE ATD UPGRADER ---
+                    # If we don't have ATD, force a live API ping every 3 minutes (180 seconds)
+                    if "ATD" not in s["dep_time"] and (now - s.get("last_dep_check", 0) > 180):
+                        try:
+                            details = fr_api.get_flight_details(f.id)
+                            if details and isinstance(details, dict):
+                                real_dep = details.get("time", {}).get("real", {}).get("departure")
+                                if real_dep:
+                                    s["dep_time"] = "ATD: " + datetime.fromtimestamp(real_dep, timezone.utc).strftime("%H:%M") + "Z"
+                                else:
+                                    sch_dep = details.get("time", {}).get("scheduled", {}).get("departure")
+                                    if sch_dep and "STD" not in s["dep_time"]:
+                                        s["dep_time"] = "STD: " + datetime.fromtimestamp(sch_dep, timezone.utc).strftime("%H:%M") + "Z"
+                            s["last_dep_check"] = now
+                        except Exception:
+                            s["last_dep_check"] = now # Prevent spamming API on failures
+                    # --------------------------------
                    
                     if s["status"] == "EN ROUTE" and dist < 100: s["status"] = "APPROACH"
                    
