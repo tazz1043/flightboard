@@ -101,7 +101,6 @@ def update_dynamic_watchlist():
             for entry in arrivals:
                 f_info = entry.get("flight", {})
                
-                # FIX: Extract BOTH callsign and passenger flight number
                 cs_raw = f_info.get("identification", {}).get("callsign")
                 num_raw = f_info.get("identification", {}).get("number", {}).get("default")
                
@@ -116,7 +115,6 @@ def update_dynamic_watchlist():
                 else:
                     dep_str = "DEP: --:--Z"
                    
-                # Map BOTH the callsign and the flight number to the same departure time
                 if cs_raw:
                     new_dict[normalize_callsign(cs_raw)] = dep_str
                 if num_raw:
@@ -141,9 +139,17 @@ async def radar_loop():
                 if not f.latitude or not f.longitude: continue
                
                 norm_cs = normalize_callsign(f.callsign)
-                if norm_cs.startswith("IFC"): continue
+                aircraft_type = f.aircraft_code.upper() if f.aircraft_code else ""
                
-                # Safely extract flight number (e.g., AI543) to cross-reference
+                # --- AGGRESSIVE MILITARY EXCLUSION ---
+                # Blocks IAF formal codes, Tactical Callsigns (Sulur AFB), and military jet types
+                TACTICAL_CALLSIGNS = ("IFC", "RAVEN", "SARANG", "TEJAS", "IAF", "VAYU", "SULUR", "DEF", "K1", "K2", "CHETAK")
+                MILITARY_AIRCRAFT = ("SU30", "LCA", "AN32", "IL76", "C17", "C130", "HAWK", "D228")
+               
+                if norm_cs.startswith(TACTICAL_CALLSIGNS) or aircraft_type.startswith(MILITARY_AIRCRAFT):
+                    continue
+                # -------------------------------------
+               
                 f_num = getattr(f, 'number', '')
                 f_num = f_num.strip().upper().replace(" ", "") if f_num else ""
                
@@ -157,7 +163,6 @@ async def radar_loop():
                 on_ground = f.on_ground == 1
                
                 is_cjb_bound = dest_iata == TARGET_IATA
-                # Check if EITHER the callsign OR the flight number is expected
                 is_auto_expected = (norm_cs in DYNAMIC_WATCHLIST) or (f_num in DYNAMIC_WATCHLIST)
                 is_manual_expected = norm_cs in NORMALIZED_MANUAL_LIST
                 is_in_airspace = (dist < 100) and (alt < 20000)
@@ -165,8 +170,6 @@ async def radar_loop():
                 if not (is_cjb_bound or is_auto_expected or is_manual_expected or is_in_airspace): continue
 
                 icao_id = f.id
-               
-                # Fetch departure time using either the Callsign OR the Flight Number
                 dep_time_str = DYNAMIC_WATCHLIST.get(norm_cs) or DYNAMIC_WATCHLIST.get(f_num) or "DEP: --:--Z"
                
                 eta_str = "--:--"
@@ -199,7 +202,6 @@ async def radar_loop():
                     if dist < 100: init_status = "APPROACH"
                     if dist < 10 and alt <= AIRPORT_ELEV + 1000: init_status = "LANDED"
                    
-                    # Deep API Interception as the absolute final fallback
                     exact_dep_str = dep_time_str
                     if "DEP: --" in exact_dep_str:
                         try:
