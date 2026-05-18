@@ -87,11 +87,13 @@ def distance_to_vocb(lat, lon):
 
 def update_dynamic_watchlist():
     global DYNAMIC_WATCHLIST, LAST_SCHEDULE_FETCH
-    if time.time() - LAST_SCHEDULE_FETCH < 1800: return
+   
+    # FIX: Check schedule every 3 minutes (180s) instead of every 30 minutes!
+    if time.time() - LAST_SCHEDULE_FETCH < 180: return
        
     url = "https://api.flightradar24.com/common/v1/airport.json"
     params = {"code": TARGET_IATA, "plugin[]": "schedule", "plugin-setting[schedule][mode]": "arrivals", "plugin-setting[schedule][timestamp]": int(time.time()), "page": 1, "limit": 100}
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0.0.0 Safari/537.36"}
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"}
    
     try:
         r = requests.get(url, headers=headers, params=params, timeout=10)
@@ -120,7 +122,8 @@ def update_dynamic_watchlist():
                 if num_raw:
                     new_dict[num_raw.strip().upper().replace(" ", "")] = dep_str
                    
-            if new_dict: DYNAMIC_WATCHLIST = new_dict
+            if new_dict:
+                DYNAMIC_WATCHLIST = new_dict
     except Exception: pass
     LAST_SCHEDULE_FETCH = time.time()
 
@@ -167,7 +170,9 @@ async def radar_loop():
                 if not (is_cjb_bound or is_auto_expected or is_manual_expected or is_in_airspace): continue
 
                 icao_id = f.id
-                dep_time_str = DYNAMIC_WATCHLIST.get(norm_cs) or DYNAMIC_WATCHLIST.get(f_num) or "DEP: --:--"
+               
+                # Retrieve the freshest data from our 3-minute schedule cache
+                current_watchlist_dep = DYNAMIC_WATCHLIST.get(norm_cs) or DYNAMIC_WATCHLIST.get(f_num) or "DEP: --:--"
                
                 eta_str = "--:--"
                 eta_unix = float('inf')
@@ -206,27 +211,12 @@ async def radar_loop():
                     init_status = "EN ROUTE"
                     if dist < 100: init_status = "APPROACH"
                     if dist < 10 and alt <= AIRPORT_ELEV + 1000: init_status = "LANDED"
-                   
-                    exact_dep_str = dep_time_str
-                    if "DEP: --" in exact_dep_str:
-                        try:
-                            details = fr_api.get_flight_details(f.id)
-                            if details and isinstance(details, dict):
-                                real_dep = details.get("time", {}).get("real", {}).get("departure")
-                                if real_dep:
-                                    exact_dep_str = "ATD: " + datetime.fromtimestamp(real_dep, timezone.utc).strftime("%H:%M")
-                                else:
-                                    sch_dep = details.get("time", {}).get("scheduled", {}).get("departure")
-                                    if sch_dep:
-                                        exact_dep_str = "STD: " + datetime.fromtimestamp(sch_dep, timezone.utc).strftime("%H:%M")
-                        except Exception: pass
 
                     strips[icao_id] = {
                         "callsign": norm_cs, "origin": get_icao_airport(f.origin_airport_iata) if f.origin_airport_iata else "UNK",
                         "dest": "VOCB", "aircraft": f.aircraft_code if f.aircraft_code else "UNK", "speed": gs,
-                        "status": init_status, "dep_time": exact_dep_str, "eta": eta_str, "sort_time": eta_unix,
-                        "touchdown": None, "last_seen": now, "distance": int(dist),
-                        "last_dep_check": 0
+                        "status": init_status, "dep_time": current_watchlist_dep, "eta": eta_str, "sort_time": eta_unix,
+                        "touchdown": None, "last_seen": now, "distance": int(dist)
                     }
 
                 if icao_id in strips:
@@ -239,22 +229,12 @@ async def radar_loop():
                         s["eta"] = eta_str
                         s["sort_time"] = eta_unix
                        
-                    # --- ACTIVE ATD UPGRADER ---
-                    if "ATD" not in s["dep_time"] and (now - s.get("last_dep_check", 0) > 180):
-                        try:
-                            details = fr_api.get_flight_details(f.id)
-                            if details and isinstance(details, dict):
-                                real_dep = details.get("time", {}).get("real", {}).get("departure")
-                                if real_dep:
-                                    s["dep_time"] = "ATD: " + datetime.fromtimestamp(real_dep, timezone.utc).strftime("%H:%M")
-                                else:
-                                    sch_dep = details.get("time", {}).get("scheduled", {}).get("departure")
-                                    if sch_dep and "STD" not in s["dep_time"]:
-                                        s["dep_time"] = "STD: " + datetime.fromtimestamp(sch_dep, timezone.utc).strftime("%H:%M")
-                            s["last_dep_check"] = now
-                        except Exception:
-                            s["last_dep_check"] = now
-                    # --------------------------------
+                    # --- FIX: Dynamic ATD Overwrite ---
+                    # If the 3-minute schedule check found an "ATD", seamlessly overwrite the old "STD" or "DEP"
+                    if "ATD" in current_watchlist_dep and "ATD" not in s["dep_time"]:
+                        s["dep_time"] = current_watchlist_dep
+                    elif "STD" in current_watchlist_dep and "DEP: --" in s["dep_time"]:
+                        s["dep_time"] = current_watchlist_dep
                    
                     if s["status"] == "EN ROUTE" and dist < 100: s["status"] = "APPROACH"
                    
