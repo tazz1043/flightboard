@@ -87,8 +87,6 @@ def distance_to_vocb(lat, lon):
 
 def update_dynamic_watchlist():
     global DYNAMIC_WATCHLIST, LAST_SCHEDULE_FETCH
-   
-    # FIX: Check schedule every 3 minutes (180s) instead of every 30 minutes!
     if time.time() - LAST_SCHEDULE_FETCH < 180: return
        
     url = "https://api.flightradar24.com/common/v1/airport.json"
@@ -122,10 +120,24 @@ def update_dynamic_watchlist():
                 if num_raw:
                     new_dict[num_raw.strip().upper().replace(" ", "")] = dep_str
                    
-            if new_dict:
-                DYNAMIC_WATCHLIST = new_dict
+            if new_dict: DYNAMIC_WATCHLIST = new_dict
     except Exception: pass
     LAST_SCHEDULE_FETCH = time.time()
+
+# --- NEW: DIRECT API PACER ---
+def get_deep_atd(flight_id):
+    try:
+        details = fr_api.get_flight_details(flight_id)
+        if details and isinstance(details, dict):
+            real_dep = details.get("time", {}).get("real", {}).get("departure")
+            if real_dep:
+                return "ATD: " + datetime.fromtimestamp(real_dep, timezone.utc).strftime("%H:%M")
+            sch_dep = details.get("time", {}).get("scheduled", {}).get("departure")
+            if sch_dep:
+                return "STD: " + datetime.fromtimestamp(sch_dep, timezone.utc).strftime("%H:%M")
+    except Exception:
+        pass
+    return None
 
 # --- BACKGROUND RADAR ENGINE ---
 async def radar_loop():
@@ -170,8 +182,6 @@ async def radar_loop():
                 if not (is_cjb_bound or is_auto_expected or is_manual_expected or is_in_airspace): continue
 
                 icao_id = f.id
-               
-                # Retrieve the freshest data from our 3-minute schedule cache
                 current_watchlist_dep = DYNAMIC_WATCHLIST.get(norm_cs) or DYNAMIC_WATCHLIST.get(f_num) or "DEP: --:--"
                
                 eta_str = "--:--"
@@ -182,7 +192,6 @@ async def radar_loop():
                     rwy_heading = 233 if rwy_in_use == "23" else 53
                     angle_diff = abs((bearing - rwy_heading + 180) % 360 - 180)
                     lateral_miles = dist + 40 if angle_diff > 90 else dist + 15
-                   
                     alt_to_lose = max(0, alt - AIRPORT_ELEV)
                    
                     if dist <= 55.56:
@@ -211,12 +220,18 @@ async def radar_loop():
                     init_status = "EN ROUTE"
                     if dist < 100: init_status = "APPROACH"
                     if dist < 10 and alt <= AIRPORT_ELEV + 1000: init_status = "LANDED"
+                   
+                    final_dep_str = current_watchlist_dep
+                    deep_dep = get_deep_atd(f.id)
+                    if deep_dep:
+                        final_dep_str = deep_dep
 
                     strips[icao_id] = {
                         "callsign": norm_cs, "origin": get_icao_airport(f.origin_airport_iata) if f.origin_airport_iata else "UNK",
                         "dest": "VOCB", "aircraft": f.aircraft_code if f.aircraft_code else "UNK", "speed": gs,
-                        "status": init_status, "dep_time": current_watchlist_dep, "eta": eta_str, "sort_time": eta_unix,
-                        "touchdown": None, "last_seen": now, "distance": int(dist)
+                        "status": init_status, "dep_time": final_dep_str, "eta": eta_str, "sort_time": eta_unix,
+                        "touchdown": None, "last_seen": now, "distance": int(dist),
+                        "last_dep_check": now
                     }
 
                 if icao_id in strips:
@@ -229,12 +244,11 @@ async def radar_loop():
                         s["eta"] = eta_str
                         s["sort_time"] = eta_unix
                        
-                    # --- FIX: Dynamic ATD Overwrite ---
-                    # If the 3-minute schedule check found an "ATD", seamlessly overwrite the old "STD" or "DEP"
-                    if "ATD" in current_watchlist_dep and "ATD" not in s["dep_time"]:
-                        s["dep_time"] = current_watchlist_dep
-                    elif "STD" in current_watchlist_dep and "DEP: --" in s["dep_time"]:
-                        s["dep_time"] = current_watchlist_dep
+                    if "ATD" not in s["dep_time"] and (now - s.get("last_dep_check", 0) > 240):
+                        deep_dep = get_deep_atd(f.id)
+                        if deep_dep:
+                            s["dep_time"] = deep_dep
+                        s["last_dep_check"] = now
                    
                     if s["status"] == "EN ROUTE" and dist < 100: s["status"] = "APPROACH"
                    
@@ -281,7 +295,8 @@ html_content = """
         .header-container { position: relative; max-width: 1000px; margin: 0 auto 20px auto; text-align: center; }
         h1 { color: #fff; font-family: sans-serif; letter-spacing: 2px; margin-bottom: 5px; margin-top: 0;}
         .rwy-header { color: #ffeb3b; font-weight: bold; font-size: 1.2em;}
-        .utc-clock { position: absolute; top: 0; right: 0; background-color: #000; color: #00ff00; padding: 8px 15px; border: 2px solid #555; font-size: 1.4em; font-weight: bold; box-shadow: 2px 2px 5px rgba(0,0,0,0.5);}
+        /* Clock font increased from 1.4em to 1.8em */
+        .utc-clock { position: absolute; top: 0; right: 0; background-color: #000; color: #00ff00; padding: 8px 15px; border: 2px solid #555; font-size: 1.8em; font-weight: bold; box-shadow: 2px 2px 5px rgba(0,0,0,0.5);}
         .board { display: flex; flex-direction: column; gap: 8px; max-width: 1000px; margin: 0 auto; }
         .strip { display: grid; grid-template-columns: 1.5fr 1.5fr 1fr 1fr 1fr; background-color: #ffe0b2; border: 2px solid #000; box-shadow: 3px 3px 5px rgba(0,0,0,0.4); height: 65px; font-weight: bold; font-size: 1.1em; }
         .strip > div { border-right: 2px solid #000; padding: 5px 10px; display: flex; flex-direction: column; justify-content: center; }
@@ -291,7 +306,8 @@ html_content = """
         .small-text { font-size: 0.75em; color: #444; }
         .large-text { font-size: 1.3em; }
         .status-text { text-align: center; font-size: 1.1em; }
-        .eta-box { background: #fff; border: 1px solid #000; padding: 2px 5px; text-align: center; display: inline-block;}
+        /* ETA box font explicitly set larger */
+        .eta-box { background: #fff; border: 1px solid #000; padding: 2px 5px; text-align: center; display: inline-block; font-size: 1.6em;}
         .landed .eta-box { background: transparent; border: none; text-decoration: line-through;}
     </style>
 </head>
@@ -346,10 +362,11 @@ html_content = """
                     const block1 = `<div><span class="large-text">${f.callsign}</span><span class="small-text">${f.aircraft} | ${f.speed} kts</span></div>`;
                     const block2 = `<div><span class="large-text">${f.origin} ✈️ ${f.dest}</span><span class="small-text">${f.dep_time} | ${f.distance} km</span></div>`;
                     const block3 = `<div><span class="status-text">${f.status}</span></div>`;
-                    const block4 = `<div style="align-items: center;"><span class="small-text">ETA (UTC)</span><span class="large-text eta-box">${f.eta}</span></div>`;
+                    const block4 = `<div style="align-items: center;"><span class="small-text">ETA (UTC)</span><span class="eta-box">${f.eta}</span></div>`;
                     const tdTime = f.touchdown ? f.touchdown : "--:--:--";
                     const tdColor = f.touchdown ? '#d32f2f' : 'inherit';
-                    const block5 = `<div><span class="small-text">ATA (UTC)</span><span class="large-text" style="color: ${tdColor}; text-align: center;">${tdTime}</span></div>`;
+                    // ATA font explicitly matched to ETA size
+                    const block5 = `<div><span class="small-text">ATA (UTC)</span><span style="color: ${tdColor}; text-align: center; font-size: 1.6em; font-weight: bold;">${tdTime}</span></div>`;
 
                     div.innerHTML = block1 + block2 + block3 + block4 + block5;
                     container.appendChild(div);
