@@ -291,8 +291,10 @@ async def radar_loop():
                    
                     if s["status"] == "EN ROUTE" and dist < 100: s["status"] = "APPROACH"
                    
-                    if s["status"] == "APPROACH" and dist < 10:
-                        if on_ground or (alt <= (AIRPORT_ELEV + 200) and gs < 80):
+                    # --- NEW: FLARE DETECTION TRIGGER ---
+                    # Catches the aircraft crossing the runway threshold rather than waiting for it to taxi
+                    if s["status"] == "APPROACH" and dist < 6:
+                        if on_ground or (alt <= (AIRPORT_ELEV + 150) and gs < 155):
                             if s["status"] != "LANDED":
                                 s["status"] = "LANDED"
                                 td_time = datetime.now(timezone.utc)
@@ -306,11 +308,22 @@ async def radar_loop():
             s = strips[k]
             time_lost = now - s["last_seen"]
            
+            # --- NEW: PREDICTIVE BACK-DATING FOR SIGNAL LOSS ---
             if s["status"] == "APPROACH" and s["distance"] < 8 and time_lost > 60:
                 s["status"] = "LANDED"
-                s["touchdown"] = datetime.now(timezone.utc).strftime("%H:%M:%S")
-                s["sort_time"] = time.time()
-                s["last_seen"] = now
+               
+                # Calculate exactly how many seconds it took to fly the remaining distance
+                # 1 knot = 0.000514 km/sec
+                speed_km_sec = max(s["speed"], 120) * 0.000514
+                seconds_to_runway = s["distance"] / speed_km_sec
+               
+                exact_td_unix = s["last_seen"] + seconds_to_runway
+                exact_td_time = datetime.fromtimestamp(exact_td_unix, timezone.utc)
+               
+                s["touchdown"] = exact_td_time.strftime("%H:%M:%S")
+                s["sort_time"] = exact_td_unix
+                s["last_seen"] = now  # Reset last_seen to keep it on the board
+            # ----------------------------------------------------
                
             elif time_lost > 900: del strips[k]
            
@@ -320,10 +333,8 @@ async def radar_loop():
 async def startup_event():
     asyncio.create_task(radar_loop())
 
-# --- NEW: FIREWALL BYPASS API ROUTE ---
 @app.get("/api/flights")
 async def get_flights_api():
-    """Allows standard HTTP polling if WebSockets are blocked by corporate firewalls."""
     current_strips = [{"icao": k, "rwy": ACTIVE_RUNWAY, **v} for k, v in strips.items()]
     current_strips.sort(key=lambda x: x["sort_time"])
     return current_strips
@@ -423,7 +434,6 @@ html_content = """
             });
         }
 
-        // --- THE FIREWALL BYPASS POLLING METHOD ---
         function fetchFlightsPolling() {
             fetch('/api/flights')
                 .then(response => response.json())
@@ -431,9 +441,8 @@ html_content = """
                 .catch(err => console.error("HTTP Polling Error:", err));
         }
 
-        // --- THE DEFAULT WEBSOCKET METHOD ---
         function connectWebSocket() {
-            if (usePolling) return; // If we already know the firewall is blocking WebSockets, don't try again.
+            if (usePolling) return;
 
             const ws_protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
             const ws = new WebSocket(ws_protocol + "//" + window.location.host + "/ws");
@@ -443,10 +452,10 @@ html_content = """
             };
 
             ws.onerror = () => {
-                console.log("WebSocket blocked by corporate firewall. Falling back to HTTP Polling...");
+                console.log("WebSocket blocked. Falling back to HTTP Polling...");
                 usePolling = true;
-                fetchFlightsPolling(); // Do it immediately once
-                setInterval(fetchFlightsPolling, 8000); // Continue every 8 seconds
+                fetchFlightsPolling();
+                setInterval(fetchFlightsPolling, 8000);
             };
             ws.onclose = () => {
                 if (!usePolling) { setTimeout(connectWebSocket, 3000); }
