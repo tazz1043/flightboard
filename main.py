@@ -204,30 +204,19 @@ async def radar_loop():
                     angle_diff = abs((bearing - rwy_heading + 180) % 360 - 180)
                     alt_to_lose = max(0, alt - AIRPORT_ELEV)
                    
-                    # --- NEW: EMPIRICAL A320 PROFILING ENGINE ---
                     if dist <= 55.56:
-                        # Inside 30 NM (TCA)
                         if angle_diff < 60:
-                            # Straight-in Approach: 8 mins from 25 NM (46.3 km)
                             mins_remaining = 8.0 * (dist / 46.3)
-                           
                         elif angle_diff < 120:
-                            # Arc Approach: 11 mins from 25 NM (46.3 km)
                             mins_remaining = 11.0 * (dist / 46.3)
-                           
                         else:
-                            # Overhead Approach: Fly to CCB, then execute procedure
                             speed_km_per_min = max(gs * 1.852, 220) / 60.0
                             mins_to_ccb = dist / speed_km_per_min
-                           
-                            # Hardcoded procedure penalty times from CCB
                             proc_time = 9.0 if rwy_in_use == "23" else 13.0
                             mins_remaining = mins_to_ccb + proc_time
-                           
                         hours_remaining = mins_remaining / 60.0
                        
                     else:
-                        # En Route Approach (Outside 30 NM)
                         lateral_miles = dist + 40 if angle_diff > 90 else dist + 15
                         required_descent_dist_km = (alt_to_lose / 1000) * 3 * 1.852
                         true_track_distance = max(lateral_miles, required_descent_dist_km)
@@ -239,7 +228,6 @@ async def radar_loop():
                            
                         blended_speed_kmh = (gs * 1.852 * 0.4) + (phase_speed * 0.6)
                         hours_remaining = true_track_distance / max(blended_speed_kmh, 250)
-                    # --------------------------------------------
                    
                     eta_time = datetime.now(timezone.utc) + timedelta(hours=hours_remaining)
                     eta_str = eta_time.strftime("%H:%M")
@@ -352,8 +340,20 @@ html_content = """
         .small-text { font-size: 0.75em; color: #444; }
         .large-text { font-size: 1.3em; }
         .status-text { text-align: center; font-size: 1.1em; }
-        .eta-box { background: #fff; border: 1px solid #000; padding: 2px 5px; text-align: center; display: inline-block; font-size: 1.6em;}
-        .landed .eta-box { background: transparent; border: none; text-decoration: line-through;}
+       
+        /* Updated ETA box to bring it inward and make it look sleeker */
+        .eta-box {
+            background: #fff;
+            border: 1px solid #000;
+            padding: 2px 12px;
+            margin-top: 4px;
+            border-radius: 6px;
+            text-align: center;
+            display: inline-block;
+            font-size: 1.6em;
+            box-shadow: inset 1px 1px 4px rgba(0,0,0,0.15);
+        }
+        .landed .eta-box { background: transparent; border: none; box-shadow: none; text-decoration: line-through;}
     </style>
 </head>
 <body>
