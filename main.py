@@ -26,7 +26,6 @@ LAST_SCHEDULE_FETCH = 0
 NORMALIZED_MANUAL_LIST = set()
 strips = {}
 
-# GPS Coordinates of Common Origins to Calculate Physics-Based ATD
 ORIGIN_COORDS = {
     "DEL": (28.5562, 77.1000), "MAA": (12.9941, 80.1709),
     "BLR": (13.1986, 77.7066), "BOM": (19.0900, 72.8680),
@@ -59,7 +58,6 @@ def get_active_runway():
     return ACTIVE_RUNWAY
 
 def get_distance(lat1, lon1, lat2, lon2):
-    """Calculates real-world distance between two GPS points."""
     R = 6371
     dlat, dlon = math.radians(lat2 - lat1), math.radians(lon2 - lon1)
     a = math.sin(dlat/2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon/2)**2
@@ -183,7 +181,6 @@ async def radar_loop():
                 v_speed = f.vertical_speed if f.vertical_speed is not None else 0
                 on_ground = f.on_ground == 1
                
-                # General Aviation Departure Filter
                 if dist < 60 and v_speed > 250 and icao_id not in strips and dest_iata != TARGET_IATA:
                     continue
                
@@ -207,19 +204,30 @@ async def radar_loop():
                     angle_diff = abs((bearing - rwy_heading + 180) % 360 - 180)
                     alt_to_lose = max(0, alt - AIRPORT_ELEV)
                    
-                    if dist <= 25:
-                        speed_kmh = max(gs * 1.852, 220)
-                        hours_remaining = dist / speed_kmh
-                       
-                    elif dist <= 55.56:
-                        mins_to_descend = alt_to_lose / 1000.0
-                        hours_vertical = mins_to_descend / 60.0
-                        speed_kmh = max(gs * 1.852, 220)
-                        lateral_miles = dist + 15 if angle_diff > 90 else dist + 5
-                        hours_lateral = lateral_miles / speed_kmh
-                        hours_remaining = max(hours_vertical, hours_lateral)
+                    # --- NEW: EMPIRICAL A320 PROFILING ENGINE ---
+                    if dist <= 55.56:
+                        # Inside 30 NM (TCA)
+                        if angle_diff < 60:
+                            # Straight-in Approach: 8 mins from 25 NM (46.3 km)
+                            mins_remaining = 8.0 * (dist / 46.3)
+                           
+                        elif angle_diff < 120:
+                            # Arc Approach: 11 mins from 25 NM (46.3 km)
+                            mins_remaining = 11.0 * (dist / 46.3)
+                           
+                        else:
+                            # Overhead Approach: Fly to CCB, then execute procedure
+                            speed_km_per_min = max(gs * 1.852, 220) / 60.0
+                            mins_to_ccb = dist / speed_km_per_min
+                           
+                            # Hardcoded procedure penalty times from CCB
+                            proc_time = 9.0 if rwy_in_use == "23" else 13.0
+                            mins_remaining = mins_to_ccb + proc_time
+                           
+                        hours_remaining = mins_remaining / 60.0
                        
                     else:
+                        # En Route Approach (Outside 30 NM)
                         lateral_miles = dist + 40 if angle_diff > 90 else dist + 15
                         required_descent_dist_km = (alt_to_lose / 1000) * 3 * 1.852
                         true_track_distance = max(lateral_miles, required_descent_dist_km)
@@ -231,6 +239,7 @@ async def radar_loop():
                            
                         blended_speed_kmh = (gs * 1.852 * 0.4) + (phase_speed * 0.6)
                         hours_remaining = true_track_distance / max(blended_speed_kmh, 250)
+                    # --------------------------------------------
                    
                     eta_time = datetime.now(timezone.utc) + timedelta(hours=hours_remaining)
                     eta_str = eta_time.strftime("%H:%M")
@@ -243,22 +252,18 @@ async def radar_loop():
                    
                     final_dep_str = current_watchlist_dep
                    
-                    # --- THE PHYSICS ATD ENGINE ---
                     if "ATD" not in final_dep_str:
                         deep_dep = get_deep_atd(f.id)
                         if deep_dep:
                             final_dep_str = deep_dep
                         else:
-                            # CLOUDFLARE FALLBACK: Reverse-engineer the ATD using spatial physics!
                             origin_iata = f.origin_airport_iata
                             if origin_iata in ORIGIN_COORDS:
                                 o_lat, o_lon = ORIGIN_COORDS[origin_iata]
                                 dist_flown = get_distance(o_lat, o_lon, f.latitude, f.longitude)
-                                # Divide distance flown by average climb/cruise speed (650 km/h)
                                 hours_flown = dist_flown / 650.0
                                 atd_time = datetime.now(timezone.utc) - timedelta(hours=hours_flown)
                                 final_dep_str = "ATD: " + atd_time.strftime("%H:%M")
-                    # ------------------------------
 
                     strips[icao_id] = {
                         "callsign": norm_cs, "origin": get_icao_airport(f.origin_airport_iata) if f.origin_airport_iata else "UNK",
@@ -278,7 +283,6 @@ async def radar_loop():
                         s["eta"] = eta_str
                         s["sort_time"] = eta_unix
                        
-                    # Maintain Physics Engine Updates if API remains blocked
                     if "ATD" not in s["dep_time"] and (now - s.get("last_dep_check", 0) > 240):
                         deep_dep = get_deep_atd(f.id)
                         if deep_dep:
