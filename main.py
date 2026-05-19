@@ -267,12 +267,9 @@ async def radar_loop():
                     s["distance"] = int(dist)
                     s["speed"] = gs
                    
-                    # --- NEW: MISSED APPROACH / GO-AROUND REVERSION ---
-                    # If marked LANDED, but suddenly climbs high (>2100ft MSL) and fast again
                     if s["status"] == "LANDED" and not on_ground and alt > (AIRPORT_ELEV + 800) and gs > 100:
                         s["status"] = "APPROACH"
                         s["touchdown"] = None
-                    # --------------------------------------------------
                    
                     if s["status"] != "LANDED":
                         s["eta"] = eta_str
@@ -295,7 +292,6 @@ async def radar_loop():
                     if s["status"] == "EN ROUTE" and dist < 100: s["status"] = "APPROACH"
                    
                     if s["status"] == "APPROACH" and dist < 10:
-                        # Tightened landing verification to avoid false positives on low passes
                         if on_ground or (alt <= (AIRPORT_ELEV + 200) and gs < 80):
                             if s["status"] != "LANDED":
                                 s["status"] = "LANDED"
@@ -310,7 +306,6 @@ async def radar_loop():
             s = strips[k]
             time_lost = now - s["last_seen"]
            
-            # Auto-Land trigger tightened from 20km to 8km (4.3 NM) to prevent premature touchdowns
             if s["status"] == "APPROACH" and s["distance"] < 8 and time_lost > 60:
                 s["status"] = "LANDED"
                 s["touchdown"] = datetime.now(timezone.utc).strftime("%H:%M:%S")
@@ -325,6 +320,13 @@ async def radar_loop():
 async def startup_event():
     asyncio.create_task(radar_loop())
 
+# --- NEW: FIREWALL BYPASS API ROUTE ---
+@app.get("/api/flights")
+async def get_flights_api():
+    """Allows standard HTTP polling if WebSockets are blocked by corporate firewalls."""
+    current_strips = [{"icao": k, "rwy": ACTIVE_RUNWAY, **v} for k, v in strips.items()]
+    current_strips.sort(key=lambda x: x["sort_time"])
+    return current_strips
 
 # --- FRONTEND WEB PAGE ---
 html_content = """
@@ -374,6 +376,8 @@ html_content = """
     </div>
 
     <script>
+        let usePolling = false;
+
         function updateClock() {
             const now = new Date();
             const hours = String(now.getUTCHours()).padStart(2, '0');
@@ -384,48 +388,69 @@ html_content = """
         setInterval(updateClock, 1000);
         updateClock();
 
+        function renderFlights(flights) {
+            const container = document.getElementById('board');
+            const rwyDisplay = document.getElementById('rwy-display');
+           
+            if (flights.length > 0 && flights[0].rwy) {
+                rwyDisplay.innerText = `ACTIVE RUNWAY IN USE: ${flights[0].rwy}`;
+            }
+
+            if (flights.length === 0) {
+                container.innerHTML = '<p style="text-align: center; color: #fff;">No inbound flights found currently.</p>';
+                return;
+            }
+
+            container.innerHTML = '';
+           
+            flights.forEach(f => {
+                const div = document.createElement('div');
+                let stripClass = "strip";
+                if (f.status === "APPROACH") stripClass += " approach";
+                if (f.status === "LANDED") stripClass += " landed";
+                div.className = stripClass;
+
+                const block1 = `<div><span class="large-text">${f.callsign}</span><span class="small-text">${f.aircraft} | ${f.speed} kts</span></div>`;
+                const block2 = `<div><span class="large-text">${f.origin} ✈️ ${f.dest}</span><span class="small-text">${f.dep_time} | ${f.distance} km</span></div>`;
+                const block3 = `<div><span class="status-text">${f.status}</span></div>`;
+                const block4 = `<div style="align-items: center;"><span class="small-text">ETA (UTC)</span><span class="eta-box">${f.eta}</span></div>`;
+                const tdTime = f.touchdown ? f.touchdown : "--:--:--";
+                const tdColor = f.touchdown ? '#d32f2f' : 'inherit';
+                const block5 = `<div><span class="small-text">ATA (UTC)</span><span style="color: ${tdColor}; text-align: center; font-size: 1.6em; font-weight: bold;">${tdTime}</span></div>`;
+
+                div.innerHTML = block1 + block2 + block3 + block4 + block5;
+                container.appendChild(div);
+            });
+        }
+
+        // --- THE FIREWALL BYPASS POLLING METHOD ---
+        function fetchFlightsPolling() {
+            fetch('/api/flights')
+                .then(response => response.json())
+                .then(data => renderFlights(data))
+                .catch(err => console.error("HTTP Polling Error:", err));
+        }
+
+        // --- THE DEFAULT WEBSOCKET METHOD ---
         function connectWebSocket() {
+            if (usePolling) return; // If we already know the firewall is blocking WebSockets, don't try again.
+
             const ws_protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
             const ws = new WebSocket(ws_protocol + "//" + window.location.host + "/ws");
            
             ws.onmessage = (event) => {
-                const flights = JSON.parse(event.data);
-                const container = document.getElementById('board');
-                const rwyDisplay = document.getElementById('rwy-display');
-               
-                if (flights.length > 0 && flights[0].rwy) {
-                    rwyDisplay.innerText = `ACTIVE RUNWAY IN USE: ${flights[0].rwy}`;
-                }
-
-                if (flights.length === 0) {
-                    container.innerHTML = '<p style="text-align: center; color: #fff;">No inbound flights found currently.</p>';
-                    return;
-                }
-
-                container.innerHTML = '';
-               
-                flights.forEach(f => {
-                    const div = document.createElement('div');
-                    let stripClass = "strip";
-                    if (f.status === "APPROACH") stripClass += " approach";
-                    if (f.status === "LANDED") stripClass += " landed";
-                    div.className = stripClass;
-
-                    const block1 = `<div><span class="large-text">${f.callsign}</span><span class="small-text">${f.aircraft} | ${f.speed} kts</span></div>`;
-                    const block2 = `<div><span class="large-text">${f.origin} ✈️ ${f.dest}</span><span class="small-text">${f.dep_time} | ${f.distance} km</span></div>`;
-                    const block3 = `<div><span class="status-text">${f.status}</span></div>`;
-                    const block4 = `<div style="align-items: center;"><span class="small-text">ETA (UTC)</span><span class="eta-box">${f.eta}</span></div>`;
-                    const tdTime = f.touchdown ? f.touchdown : "--:--:--";
-                    const tdColor = f.touchdown ? '#d32f2f' : 'inherit';
-                    const block5 = `<div><span class="small-text">ATA (UTC)</span><span style="color: ${tdColor}; text-align: center; font-size: 1.6em; font-weight: bold;">${tdTime}</span></div>`;
-
-                    div.innerHTML = block1 + block2 + block3 + block4 + block5;
-                    container.appendChild(div);
-                });
+                renderFlights(JSON.parse(event.data));
             };
 
-            ws.onerror = () => { document.getElementById('board').innerHTML = '<p style="text-align: center; color: #ff5252; font-weight: bold;">Connection lost. Reconnecting...</p>'; };
-            ws.onclose = () => { setTimeout(connectWebSocket, 3000); };
+            ws.onerror = () => {
+                console.log("WebSocket blocked by corporate firewall. Falling back to HTTP Polling...");
+                usePolling = true;
+                fetchFlightsPolling(); // Do it immediately once
+                setInterval(fetchFlightsPolling, 8000); // Continue every 8 seconds
+            };
+            ws.onclose = () => {
+                if (!usePolling) { setTimeout(connectWebSocket, 3000); }
+            };
         }
        
         connectWebSocket();
