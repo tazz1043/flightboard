@@ -267,6 +267,13 @@ async def radar_loop():
                     s["distance"] = int(dist)
                     s["speed"] = gs
                    
+                    # --- NEW: MISSED APPROACH / GO-AROUND REVERSION ---
+                    # If marked LANDED, but suddenly climbs high (>2100ft MSL) and fast again
+                    if s["status"] == "LANDED" and not on_ground and alt > (AIRPORT_ELEV + 800) and gs > 100:
+                        s["status"] = "APPROACH"
+                        s["touchdown"] = None
+                    # --------------------------------------------------
+                   
                     if s["status"] != "LANDED":
                         s["eta"] = eta_str
                         s["sort_time"] = eta_unix
@@ -288,7 +295,8 @@ async def radar_loop():
                     if s["status"] == "EN ROUTE" and dist < 100: s["status"] = "APPROACH"
                    
                     if s["status"] == "APPROACH" and dist < 10:
-                        if on_ground or (alt <= (AIRPORT_ELEV + 100) and gs < 60):
+                        # Tightened landing verification to avoid false positives on low passes
+                        if on_ground or (alt <= (AIRPORT_ELEV + 200) and gs < 80):
                             if s["status"] != "LANDED":
                                 s["status"] = "LANDED"
                                 td_time = datetime.now(timezone.utc)
@@ -302,7 +310,8 @@ async def radar_loop():
             s = strips[k]
             time_lost = now - s["last_seen"]
            
-            if s["status"] == "APPROACH" and s["distance"] < 20 and time_lost > 60:
+            # Auto-Land trigger tightened from 20km to 8km (4.3 NM) to prevent premature touchdowns
+            if s["status"] == "APPROACH" and s["distance"] < 8 and time_lost > 60:
                 s["status"] = "LANDED"
                 s["touchdown"] = datetime.now(timezone.utc).strftime("%H:%M:%S")
                 s["sort_time"] = time.time()
@@ -340,8 +349,6 @@ html_content = """
         .small-text { font-size: 0.75em; color: #444; }
         .large-text { font-size: 1.3em; }
         .status-text { text-align: center; font-size: 1.1em; }
-       
-        /* Updated ETA box to bring it inward and make it look sleeker */
         .eta-box {
             background: #fff;
             border: 1px solid #000;
