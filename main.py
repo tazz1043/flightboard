@@ -158,14 +158,17 @@ def get_deep_atd(flight_id):
         pass
     return None
 
+# --- BACKGROUND RADAR ENGINE ---
 async def radar_loop():
     global strips
     while True:
-        update_dynamic_watchlist()
-        rwy_in_use = get_active_runway()
+        # Offload blocking configuration checks to separate background threads
+        await asyncio.to_thread(update_dynamic_watchlist)
+        rwy_in_use = await asyncio.to_thread(get_active_runway)
        
         try:
-            flights = fr_api.get_flights(bounds=REGION_BOUNDS)
+            # Offload heavy synchronous radar pulling to a thread to unfreeze the event loop
+            flights = await asyncio.to_thread(fr_api.get_flights, bounds=REGION_BOUNDS)
             now = time.time()
            
             for f in flights:
@@ -251,7 +254,7 @@ async def radar_loop():
                     final_dep_str = current_watchlist_dep
                    
                     if "ATD" not in final_dep_str:
-                        deep_dep = get_deep_atd(f.id)
+                        deep_dep = await asyncio.to_thread(get_deep_atd, f.id)
                         if deep_dep:
                             final_dep_str = deep_dep
                         else:
@@ -268,7 +271,7 @@ async def radar_loop():
                         "dest": "VOCB", "aircraft": f.aircraft_code if f.aircraft_code else "UNK", "speed": gs,
                         "status": init_status, "dep_time": final_dep_str, "eta": eta_str, "sort_time": eta_unix,
                         "touchdown": None, "last_seen": now, "distance": int(dist),
-                        "last_dep_check": now, "min_distance": int(dist) # Initialize the new memory tracker
+                        "last_dep_check": now, "min_distance": int(dist)
                     }
 
                 if icao_id in strips:
@@ -276,17 +279,14 @@ async def radar_loop():
                     s["last_seen"] = now
                     s["distance"] = int(dist)
                     s["speed"] = gs
-                   
-                    # Log the absolute closest this aircraft has ever been to the runway
                     s["min_distance"] = min(s.get("min_distance", int(dist)), int(dist))
                    
-                    # --- NEW: TOUCH-AND-GO / DEPARTURE PRUNER ---
-                    # If it came close (< 15 km) but is now leaving the airspace (> 55 km), it's a departure. Kill it.
+                    # Touch-and-Go Pruner
                     if s["min_distance"] < 15 and int(dist) > 55:
                         del strips[icao_id]
                         continue
-                    # --------------------------------------------
                    
+                    # Go-Around Reversion Detector
                     if s["status"] == "LANDED" and not on_ground and alt > (AIRPORT_ELEV + 800) and gs > 100:
                         s["status"] = "APPROACH"
                         s["touchdown"] = None
@@ -296,7 +296,7 @@ async def radar_loop():
                         s["sort_time"] = eta_unix
                        
                     if "ATD" not in s["dep_time"] and (now - s.get("last_dep_check", 0) > 240):
-                        deep_dep = get_deep_atd(f.id)
+                        deep_dep = await asyncio.to_thread(get_deep_atd, f.id)
                         if deep_dep:
                             s["dep_time"] = deep_dep
                         else:
@@ -311,6 +311,7 @@ async def radar_loop():
                    
                     if s["status"] == "EN ROUTE" and dist < 100: s["status"] = "APPROACH"
                    
+                    # 3D Terminal Geofence Touchdown Monitor
                     if s["status"] == "APPROACH":
                         if on_ground or (dist < 3.0 and alt <= (AIRPORT_ELEV + 2000)):
                             if s["status"] != "LANDED":
@@ -326,6 +327,7 @@ async def radar_loop():
             s = strips[k]
             time_lost = now - s["last_seen"]
            
+            # High-Precision Blind Predictor for signal drops
             if s["status"] == "APPROACH" and s["distance"] < 15 and time_lost > 45:
                 s["status"] = "LANDED"
                 speed_km_sec = 260.0 / 3600.0
@@ -346,7 +348,9 @@ async def startup_event():
 
 @app.get("/api/flights")
 async def get_flights_api():
-    current_strips = [{"icao": k, "rwy": ACTIVE_RUNWAY, **v} for k, v in strips.items()]
+    # Thread-safe snapshot copy of global dictionary to prevent size-mutation crashes
+    strips_snapshot = list(strips.items())
+    current_strips = [{"icao": k, "rwy": ACTIVE_RUNWAY, **v} for k, v in strips_snapshot]
     current_strips.sort(key=lambda x: x["sort_time"])
     return current_strips
 
@@ -461,3 +465,21 @@ html_content = """
     </script>
 </body>
 </html>
+"""
+
+@app.get("/")
+async def get_webpage():
+    return HTMLResponse(html_content)
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    try:
+        while True:
+            strips_snapshot = list(strips.items())
+            current_strips = [{"icao": k, "rwy": ACTIVE_RUNWAY, **v} for k, v in strips_snapshot]
+            current_strips.sort(key=lambda x: x["sort_time"])
+            await websocket.send_json(current_strips)
+            await asyncio.sleep(8)
+    except Exception:
+        pass
