@@ -26,7 +26,6 @@ LAST_SCHEDULE_FETCH = 0
 NORMALIZED_MANUAL_LIST = set()
 strips = {}
 
-# GPS Coordinates of Common Origins to Calculate Physics-Based ATD
 ORIGIN_COORDS = {
     "DEL": (28.5562, 77.1000), "MAA": (12.9941, 80.1709),
     "BLR": (13.1986, 77.7066), "BOM": (19.0900, 72.8680),
@@ -83,7 +82,6 @@ AIRLINE_MAP = {
     "IC": "GOA", "I7": "IOA", "G9": "ABY", "TR": "TGW", "EK": "UAE"
 }
 
-# Massively Expanded IATA to ICAO Translation Dictionary
 AIRPORT_MAP = {
     "CJB": "VOCB", "DEL": "VIDP", "BOM": "VABB", "BLR": "VOBL",
     "MAA": "VOMM", "HYD": "VOHS", "COK": "VOCI", "SIN": "WSSS",
@@ -108,8 +106,7 @@ def normalize_callsign(callsign):
         if callsign.startswith(iata): return callsign.replace(iata, icao, 1)
     return callsign
 
-def get_icao_airport(iata):
-    return AIRPORT_MAP.get(iata, iata)
+def get_icao_airport(iata): return AIRPORT_MAP.get(iata, iata)
 
 def update_dynamic_watchlist():
     global DYNAMIC_WATCHLIST, LAST_SCHEDULE_FETCH
@@ -117,7 +114,7 @@ def update_dynamic_watchlist():
        
     url = "https://api.flightradar24.com/common/v1/airport.json"
     params = {"code": TARGET_IATA, "plugin[]": "schedule", "plugin-setting[schedule][mode]": "arrivals", "plugin-setting[schedule][timestamp]": int(time.time()), "page": 1, "limit": 100}
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"}
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
    
     try:
         r = requests.get(url, headers=headers, params=params, timeout=10)
@@ -126,11 +123,10 @@ def update_dynamic_watchlist():
             new_dict = {}
             for entry in arrivals:
                 f_info = entry.get("flight", {})
-               
                 cs_raw = f_info.get("identification", {}).get("callsign")
                 num_raw = f_info.get("identification", {}).get("number", {}).get("default")
-               
                 times = f_info.get("time", {})
+               
                 real_dep = times.get("real", {}).get("departure")
                 sch_dep = times.get("scheduled", {}).get("departure")
                
@@ -141,10 +137,8 @@ def update_dynamic_watchlist():
                 else:
                     dep_str = "DEP: --:--"
                    
-                if cs_raw:
-                    new_dict[normalize_callsign(cs_raw)] = dep_str
-                if num_raw:
-                    new_dict[num_raw.strip().upper().replace(" ", "")] = dep_str
+                if cs_raw: new_dict[normalize_callsign(cs_raw)] = dep_str
+                if num_raw: new_dict[num_raw.strip().upper().replace(" ", "")] = dep_str
                    
             if new_dict: DYNAMIC_WATCHLIST = new_dict
     except Exception: pass
@@ -164,7 +158,6 @@ def get_deep_atd(flight_id):
         pass
     return None
 
-# --- BACKGROUND RADAR ENGINE ---
 async def radar_loop():
     global strips
     while True:
@@ -221,28 +214,31 @@ async def radar_loop():
                     angle_diff = abs((bearing - rwy_heading + 180) % 360 - 180)
                     alt_to_lose = max(0, alt - AIRPORT_ELEV)
                    
+                    # --- NEW: DECELERATION CURVE BUFFER ---
+                    # Adds up to 1.5 minutes (90 seconds) seamlessly as the aircraft gets closer to 0 NM
+                    decel_buffer_mins = 1.5 * (1 - (dist / 55.56)) if dist <= 55.56 else 0
+                    # --------------------------------------
+
                     if dist <= 55.56:
                         if angle_diff < 60:
-                            mins_remaining = 8.0 * (dist / 46.3)
+                            mins_remaining = 8.0 * (dist / 46.3) + decel_buffer_mins
                         elif angle_diff < 120:
-                            mins_remaining = 11.0 * (dist / 46.3)
+                            mins_remaining = 11.0 * (dist / 46.3) + decel_buffer_mins
                         else:
                             speed_km_per_min = max(gs * 1.852, 220) / 60.0
                             mins_to_ccb = dist / speed_km_per_min
                             proc_time = 9.0 if rwy_in_use == "23" else 13.0
-                            mins_remaining = mins_to_ccb + proc_time
+                            mins_remaining = mins_to_ccb + proc_time + decel_buffer_mins
                         hours_remaining = mins_remaining / 60.0
                        
                     else:
                         lateral_miles = dist + 40 if angle_diff > 90 else dist + 15
                         required_descent_dist_km = (alt_to_lose / 1000) * 3 * 1.852
                         true_track_distance = max(lateral_miles, required_descent_dist_km)
-                       
                         if alt < 5000: phase_speed = 260
                         elif alt < 10000: phase_speed = 450
                         elif alt < 20000: phase_speed = 550
                         else: phase_speed = 750
-                           
                         blended_speed_kmh = (gs * 1.852 * 0.4) + (phase_speed * 0.6)
                         hours_remaining = true_track_distance / max(blended_speed_kmh, 250)
                    
@@ -308,8 +304,10 @@ async def radar_loop():
                    
                     if s["status"] == "EN ROUTE" and dist < 100: s["status"] = "APPROACH"
                    
-                    if s["status"] == "APPROACH" and dist < 8:
-                        if on_ground or (alt <= (AIRPORT_ELEV + 600) and gs <= 135):
+                    # --- NEW: TERMINAL GEOFENCE ---
+                    # Replaces speed-gates entirely. If within 3 km of airport center and below 2000ft AGL, mark as Landed.
+                    if s["status"] == "APPROACH":
+                        if on_ground or (dist < 3.0 and alt <= (AIRPORT_ELEV + 2000)):
                             if s["status"] != "LANDED":
                                 s["status"] = "LANDED"
                                 td_time = datetime.now(timezone.utc)
@@ -323,15 +321,22 @@ async def radar_loop():
             s = strips[k]
             time_lost = now - s["last_seen"]
            
-            if s["status"] == "APPROACH" and s["distance"] < 8 and time_lost > 60:
+            # --- NEW: HIGH-PRECISION BLIND PREDICTOR ---
+            # If signal completely vanishes inside 15km (8 NM) for > 45 seconds
+            if s["status"] == "APPROACH" and s["distance"] < 15 and time_lost > 45:
                 s["status"] = "LANDED"
-                speed_km_sec = max(s["speed"], 120) * 0.000514
+               
+                # Assume a strict VAPP of 140 knots (260 km/h) for the final blind segment
+                speed_km_sec = 260.0 / 3600.0
                 seconds_to_runway = s["distance"] / speed_km_sec
+               
                 exact_td_unix = s["last_seen"] + seconds_to_runway
                 exact_td_time = datetime.fromtimestamp(exact_td_unix, timezone.utc)
+               
                 s["touchdown"] = exact_td_time.strftime("%H:%M:%S")
                 s["sort_time"] = exact_td_unix
                 s["last_seen"] = now
+            # -------------------------------------------
                
             elif time_lost > 900: del strips[k]
            
@@ -370,17 +375,7 @@ html_content = """
         .small-text { font-size: 0.75em; color: #444; }
         .large-text { font-size: 1.3em; }
         .status-text { text-align: center; font-size: 1.1em; }
-        .eta-box {
-            background: #fff;
-            border: 1px solid #000;
-            padding: 2px 12px;
-            margin-top: 4px;
-            border-radius: 6px;
-            text-align: center;
-            display: inline-block;
-            font-size: 1.6em;
-            box-shadow: inset 1px 1px 4px rgba(0,0,0,0.15);
-        }
+        .eta-box { background: #fff; border: 1px solid #000; padding: 2px 12px; margin-top: 4px; border-radius: 6px; text-align: center; display: inline-block; font-size: 1.6em; box-shadow: inset 1px 1px 4px rgba(0,0,0,0.15);}
         .landed .eta-box { background: transparent; border: none; box-shadow: none; text-decoration: line-through;}
     </style>
 </head>
@@ -411,9 +406,7 @@ html_content = """
             const container = document.getElementById('board');
             const rwyDisplay = document.getElementById('rwy-display');
            
-            if (flights.length > 0 && flights[0].rwy) {
-                rwyDisplay.innerText = `ACTIVE RUNWAY IN USE: ${flights[0].rwy}`;
-            }
+            if (flights.length > 0 && flights[0].rwy) { rwyDisplay.innerText = `ACTIVE RUNWAY IN USE: ${flights[0].rwy}`; }
 
             if (flights.length === 0) {
                 container.innerHTML = '<p style="text-align: center; color: #fff;">No inbound flights found currently.</p>';
@@ -455,9 +448,7 @@ html_content = """
             const ws_protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
             const ws = new WebSocket(ws_protocol + "//" + window.location.host + "/ws");
            
-            ws.onmessage = (event) => {
-                renderFlights(JSON.parse(event.data));
-            };
+            ws.onmessage = (event) => { renderFlights(JSON.parse(event.data)); };
 
             ws.onerror = () => {
                 console.log("WebSocket blocked. Falling back to HTTP Polling...");
@@ -465,9 +456,7 @@ html_content = """
                 fetchFlightsPolling();
                 setInterval(fetchFlightsPolling, 8000);
             };
-            ws.onclose = () => {
-                if (!usePolling) { setTimeout(connectWebSocket, 3000); }
-            };
+            ws.onclose = () => { if (!usePolling) { setTimeout(connectWebSocket, 3000); } };
         }
        
         connectWebSocket();
