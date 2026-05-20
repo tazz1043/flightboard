@@ -214,10 +214,7 @@ async def radar_loop():
                     angle_diff = abs((bearing - rwy_heading + 180) % 360 - 180)
                     alt_to_lose = max(0, alt - AIRPORT_ELEV)
                    
-                    # --- NEW: DECELERATION CURVE BUFFER ---
-                    # Adds up to 1.5 minutes (90 seconds) seamlessly as the aircraft gets closer to 0 NM
                     decel_buffer_mins = 1.5 * (1 - (dist / 55.56)) if dist <= 55.56 else 0
-                    # --------------------------------------
 
                     if dist <= 55.56:
                         if angle_diff < 60:
@@ -271,7 +268,7 @@ async def radar_loop():
                         "dest": "VOCB", "aircraft": f.aircraft_code if f.aircraft_code else "UNK", "speed": gs,
                         "status": init_status, "dep_time": final_dep_str, "eta": eta_str, "sort_time": eta_unix,
                         "touchdown": None, "last_seen": now, "distance": int(dist),
-                        "last_dep_check": now
+                        "last_dep_check": now, "min_distance": int(dist) # Initialize the new memory tracker
                     }
 
                 if icao_id in strips:
@@ -279,6 +276,16 @@ async def radar_loop():
                     s["last_seen"] = now
                     s["distance"] = int(dist)
                     s["speed"] = gs
+                   
+                    # Log the absolute closest this aircraft has ever been to the runway
+                    s["min_distance"] = min(s.get("min_distance", int(dist)), int(dist))
+                   
+                    # --- NEW: TOUCH-AND-GO / DEPARTURE PRUNER ---
+                    # If it came close (< 15 km) but is now leaving the airspace (> 55 km), it's a departure. Kill it.
+                    if s["min_distance"] < 15 and int(dist) > 55:
+                        del strips[icao_id]
+                        continue
+                    # --------------------------------------------
                    
                     if s["status"] == "LANDED" and not on_ground and alt > (AIRPORT_ELEV + 800) and gs > 100:
                         s["status"] = "APPROACH"
@@ -304,8 +311,6 @@ async def radar_loop():
                    
                     if s["status"] == "EN ROUTE" and dist < 100: s["status"] = "APPROACH"
                    
-                    # --- NEW: TERMINAL GEOFENCE ---
-                    # Replaces speed-gates entirely. If within 3 km of airport center and below 2000ft AGL, mark as Landed.
                     if s["status"] == "APPROACH":
                         if on_ground or (dist < 3.0 and alt <= (AIRPORT_ELEV + 2000)):
                             if s["status"] != "LANDED":
@@ -321,22 +326,15 @@ async def radar_loop():
             s = strips[k]
             time_lost = now - s["last_seen"]
            
-            # --- NEW: HIGH-PRECISION BLIND PREDICTOR ---
-            # If signal completely vanishes inside 15km (8 NM) for > 45 seconds
             if s["status"] == "APPROACH" and s["distance"] < 15 and time_lost > 45:
                 s["status"] = "LANDED"
-               
-                # Assume a strict VAPP of 140 knots (260 km/h) for the final blind segment
                 speed_km_sec = 260.0 / 3600.0
                 seconds_to_runway = s["distance"] / speed_km_sec
-               
                 exact_td_unix = s["last_seen"] + seconds_to_runway
                 exact_td_time = datetime.fromtimestamp(exact_td_unix, timezone.utc)
-               
                 s["touchdown"] = exact_td_time.strftime("%H:%M:%S")
                 s["sort_time"] = exact_td_unix
                 s["last_seen"] = now
-            # -------------------------------------------
                
             elif time_lost > 900: del strips[k]
            
