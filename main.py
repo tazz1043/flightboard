@@ -195,7 +195,6 @@ async def radar_loop():
                 on_ground = f.on_ground == 1
                
                 # --- SENSOR HANDOVER CHECK (FIRST PRIORITY) ---
-                # Check callsign records to see if this is an active handover update
                 duplicate_id = None
                 for existing_id, strip_data in list(strips.items()):
                     if strip_data["callsign"] == norm_cs and strip_data["status"] != "LANDED":
@@ -203,10 +202,8 @@ async def radar_loop():
                             duplicate_id = existing_id
                         break
 
-                # The Tracking Shield: Active ongoing flights bypass firewall evaluations entirely
                 is_already_tracked = (icao_id in strips) or (duplicate_id is not None)
                
-                # Apply destination firewall rules ONLY to brand new untracked tracks
                 if not is_already_tracked:
                     if dest_iata and dest_iata not in [TARGET_IATA, "N/A", ""]:
                         continue
@@ -227,7 +224,6 @@ async def radar_loop():
                 if not is_qualified:
                     continue
 
-                # Complete Handover Stitching process
                 historical_dep = None
                 historical_missed_approach = False
                
@@ -318,12 +314,10 @@ async def radar_loop():
                     s["distance"] = int(dist)
                     s["speed"] = gs
                    
-                    # State-Based Touch-and-Go Departure Pruner
                     if s.get("initiated_missed_approach") and dist > 55.56:
                         del strips[icao_id]
                         continue
                    
-                    # Go-Around Reversion Sensor
                     if s["status"] == "LANDED" and not on_ground and alt > (AIRPORT_ELEV + 800) and gs > 100:
                         s["status"] = "APPROACH"
                         s["touchdown"] = None
@@ -373,16 +367,21 @@ async def radar_loop():
             s = strips[k]
             time_lost = now - s["last_seen"]
            
-            # High-Precision Blind Predictor
-            if s["status"] == "APPROACH" and s["distance"] < 15 and time_lost > 45:
-                s["status"] = "LANDED"
+            # --- HIGH-PRECISION BLIND PREDICTOR UPGRADE ---
+            # Radius tightened to 6km (3 NM) and network lag tolerance raised to 75 seconds
+            if s["status"] == "APPROACH" and s["distance"] < 6 and time_lost > 75:
                 speed_km_sec = 260.0 / 3600.0
                 seconds_to_runway = s["distance"] / speed_km_sec
                 exact_td_unix = s["last_seen"] + seconds_to_runway
-                exact_td_time = datetime.fromtimestamp(exact_td_unix, timezone.utc)
-                s["touchdown"] = exact_td_time.strftime("%H:%M:%S")
-                s["sort_time"] = exact_td_unix
-                s["last_seen"] = now
+               
+                # SANTIY BARRIER: Never print a touchdown time that lies in the future
+                if now >= exact_td_unix:
+                    s["status"] = "LANDED"
+                    exact_td_time = datetime.fromtimestamp(exact_td_unix, timezone.utc)
+                    s["touchdown"] = exact_td_time.strftime("%H:%M:%S")
+                    s["sort_time"] = exact_td_unix
+                    s["last_seen"] = now
+            # -----------------------------------------------
                
             elif time_lost > 900: del strips[k]
            
