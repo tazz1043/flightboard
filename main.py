@@ -214,6 +214,7 @@ async def radar_loop():
                         break
 
                 is_already_tracked = (icao_id in strips) or (duplicate_id is not None)
+                is_auto_expected = (norm_cs in DYNAMIC_WATCHLIST) or (f_num in DYNAMIC_WATCHLIST)
                
                 if not is_already_tracked:
                     if dest_iata and dest_iata not in [TARGET_IATA, "N/A", ""]:
@@ -223,7 +224,6 @@ async def radar_loop():
                     continue
                
                 is_cjb_bound = dest_iata == TARGET_IATA
-                is_auto_expected = (norm_cs in DYNAMIC_WATCHLIST) or (f_num in DYNAMIC_WATCHLIST)
                 is_manual_expected = norm_cs in NORMALIZED_MANUAL_LIST
                 is_unannounced_arrival = (dest_iata in ["", "N/A"]) and (dist < 75) and (alt < 15000) and (v_speed < -150)
 
@@ -254,10 +254,7 @@ async def radar_loop():
                     angle_diff = abs((bearing - rwy_heading + 180) % 360 - 180)
                     alt_to_lose = max(0, alt - AIRPORT_ELEV)
                    
-                    # --- FIXED ETA OVERHANG ---
-                    # Reduced max buffer from 1.5 mins down to 0.5 mins (30 seconds) to prevent late ATAs
                     decel_buffer_mins = 0.5 * (1 - (dist / 55.56)) if dist <= 55.56 else 0
-                    # --------------------------
 
                     if dist <= 55.56:
                         if angle_diff < 60:
@@ -298,25 +295,24 @@ async def radar_loop():
                         if deep_dep:
                             final_dep_str = deep_dep
                         else:
-                            # --- DYNAMIC ATD SCALER ---
                             origin_iata = f.origin_airport_iata
                             if origin_iata in ORIGIN_COORDS:
                                 o_lat, o_lon = ORIGIN_COORDS[origin_iata]
                                 dist_flown = get_distance(o_lat, o_lon, f.latitude, f.longitude)
                                 total_route_dist = get_distance(o_lat, o_lon, VOCB_LAT, VOCB_LON)
                                
+                                # --- NEW: EMPIRICAL BLOCK SPEED CURVE ---
                                 if aircraft_type.startswith("AT") or "ATR" in aircraft_type or aircraft_type.startswith("DH"):
                                     perf_speed = 430.0
-                                    perf_sid = 5.0
                                 else:
-                                    # Scales speed based on total distance: higher for SIN/DEL, lower for BOM/BLR
-                                    perf_speed = min(820.0, 580.0 + (total_route_dist / 10.0))
-                                    perf_sid = 5.0
+                                    # Dynamically adds speed based on how far the origin is
+                                    perf_speed = 650.0 + (total_route_dist / 50.0)
                                    
+                                perf_sid = 4.0
                                 hours_flown = max(0, (dist_flown / perf_speed) + (perf_sid / 60.0))
                                 atd_time = datetime.now(timezone.utc) - timedelta(hours=hours_flown)
                                 final_dep_str = "ATD: " + atd_time.strftime("%H:%M")
-                            # --------------------------
+                                # ----------------------------------------
 
                     strips[icao_id] = {
                         "callsign": norm_cs, "origin": get_icao_airport(f.origin_airport_iata) if f.origin_airport_iata else "UNK",
@@ -363,11 +359,10 @@ async def radar_loop():
                                
                                 if aircraft_type.startswith("AT") or "ATR" in aircraft_type or aircraft_type.startswith("DH"):
                                     perf_speed = 430.0
-                                    perf_sid = 5.0
                                 else:
-                                    perf_speed = min(820.0, 580.0 + (total_route_dist / 10.0))
-                                    perf_sid = 5.0
+                                    perf_speed = 650.0 + (total_route_dist / 50.0)
                                    
+                                perf_sid = 4.0
                                 hours_flown = max(0, (dist_flown / perf_speed) + (perf_sid / 60.0))
                                 atd_time = datetime.now(timezone.utc) - timedelta(hours=hours_flown)
                                 s["dep_time"] = "ATD: " + atd_time.strftime("%H:%M")
@@ -533,21 +528,3 @@ html_content = """
     </script>
 </body>
 </html>
-"""
-
-@app.get("/")
-async def get_webpage():
-    return HTMLResponse(html_content)
-
-@app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    await websocket.accept()
-    try:
-        while True:
-            strips_snapshot = list(strips.items())
-            current_strips = [{"icao": k, "rwy": ACTIVE_RUNWAY, **v} for k, v in strips_snapshot]
-            current_strips.sort(key=lambda x: x["sort_time"])
-            await websocket.send_json(current_strips)
-            await asyncio.sleep(8)
-    except Exception:
-        pass
