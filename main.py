@@ -49,7 +49,7 @@ def get_active_runway():
         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
         with urllib.request.urlopen(req, timeout=5) as response:
             data = response.read().decode('utf-8')
-            lines = data.splitlines()  # Fixed multi-line parsing issue here
+            lines = data.splitlines()
             if len(lines) > 1:
                 metar = lines[1]
                 for p in metar.split():
@@ -302,7 +302,7 @@ async def radar_loop():
                     s["distance"] = int(dist)
                     s["speed"] = gs
                    
-                    # Trajectory Pruner
+                    # State-Based Touch-and-Go Departure Pruner
                     if s.get("initiated_missed_approach") and dist > 55.56:
                         del strips[icao_id]
                         continue
@@ -487,3 +487,21 @@ html_content = """
 </body>
 </html>
 """
+
+# --- THE MISSING ENDPOINTS (THE REASON FOR THE 404) ---
+@app.get("/")
+async def get_webpage():
+    return HTMLResponse(html_content)
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    try:
+        while True:
+            strips_snapshot = list(strips.items())
+            current_strips = [{"icao": k, "rwy": ACTIVE_RUNWAY, **v} for k, v in strips_snapshot]
+            current_strips.sort(key=lambda x: x["sort_time"])
+            await websocket.send_json(current_strips)
+            await asyncio.sleep(8)
+    except Exception:
+        pass
