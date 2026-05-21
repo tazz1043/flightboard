@@ -162,12 +162,10 @@ def get_deep_atd(flight_id):
 async def radar_loop():
     global strips
     while True:
-        # Offload blocking configuration checks to separate background threads
         await asyncio.to_thread(update_dynamic_watchlist)
         rwy_in_use = await asyncio.to_thread(get_active_runway)
        
         try:
-            # Offload heavy synchronous radar pulling to a thread to unfreeze the event loop
             flights = await asyncio.to_thread(fr_api.get_flights, bounds=REGION_BOUNDS)
             now = time.time()
            
@@ -203,8 +201,32 @@ async def radar_loop():
                 is_manual_expected = norm_cs in NORMALIZED_MANUAL_LIST
                 is_unannounced_arrival = (dest_iata in ["", "N/A"]) and (dist < 75) and (alt < 15000) and (v_speed < -150)
                
-                if not (is_already_tracked or is_cjb_bound or is_auto_expected or is_manual_expected or is_unannounced_arrival):
+                DOMESTIC_CARRIERS = ("IGO", "AIC", "VTI", "SEJ", "IAD", "AXB", "AKJ", "LLR")
+                is_local_carrier_bubble = norm_cs.startswith(DOMESTIC_CARRIERS) and (dist < 60) and (alt < 15000)
+
+                is_qualified = (
+                    is_already_tracked or is_cjb_bound or is_auto_expected or
+                    is_manual_expected or is_unannounced_arrival or is_local_carrier_bubble
+                )
+               
+                if not is_qualified:
                     continue
+
+                # --- SENSOR HANDOVER ID STITCHING ---
+                duplicate_id = None
+                for existing_id, strip_data in list(strips.items()):
+                    if strip_data["callsign"] == norm_cs and existing_id != icao_id and strip_data["status"] != "LANDED":
+                        duplicate_id = existing_id
+                        break
+
+                historical_dep = None
+                historical_min_dist = dist
+               
+                if duplicate_id:
+                    historical_dep = strips[duplicate_id]["dep_time"]
+                    historical_min_dist = strips[duplicate_id].get("min_distance", dist)
+                    del strips[duplicate_id]
+                # -----------------------------------------
 
                 current_watchlist_dep = DYNAMIC_WATCHLIST.get(norm_cs) or DYNAMIC_WATCHLIST.get(f_num) or "DEP: --:--"
                
@@ -251,7 +273,7 @@ async def radar_loop():
                     if dist < 100: init_status = "APPROACH"
                     if dist < 10 and alt <= AIRPORT_ELEV + 1000: init_status = "LANDED"
                    
-                    final_dep_str = current_watchlist_dep
+                    final_dep_str = historical_dep if historical_dep else current_watchlist_dep
                    
                     if "ATD" not in final_dep_str:
                         deep_dep = await asyncio.to_thread(get_deep_atd, f.id)
@@ -271,7 +293,7 @@ async def radar_loop():
                         "dest": "VOCB", "aircraft": f.aircraft_code if f.aircraft_code else "UNK", "speed": gs,
                         "status": init_status, "dep_time": final_dep_str, "eta": eta_str, "sort_time": eta_unix,
                         "touchdown": None, "last_seen": now, "distance": int(dist),
-                        "last_dep_check": now, "min_distance": int(dist)
+                        "last_dep_check": now, "min_distance": int(historical_min_dist)
                     }
 
                 if icao_id in strips:
@@ -327,7 +349,7 @@ async def radar_loop():
             s = strips[k]
             time_lost = now - s["last_seen"]
            
-            # High-Precision Blind Predictor for signal drops
+            # High-Precision Blind Predictor
             if s["status"] == "APPROACH" and s["distance"] < 15 and time_lost > 45:
                 s["status"] = "LANDED"
                 speed_km_sec = 260.0 / 3600.0
@@ -348,7 +370,6 @@ async def startup_event():
 
 @app.get("/api/flights")
 async def get_flights_api():
-    # Thread-safe snapshot copy of global dictionary to prevent size-mutation crashes
     strips_snapshot = list(strips.items())
     current_strips = [{"icao": k, "rwy": ACTIVE_RUNWAY, **v} for k, v in strips_snapshot]
     current_strips.sort(key=lambda x: x["sort_time"])
