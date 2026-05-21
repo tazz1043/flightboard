@@ -214,16 +214,21 @@ async def radar_loop():
                         break
 
                 is_already_tracked = (icao_id in strips) or (duplicate_id is not None)
+                is_auto_expected = (norm_cs in DYNAMIC_WATCHLIST) or (f_num in DYNAMIC_WATCHLIST)
                
+                # --- NEW: LONG-RANGE GHOST FILTER ---
+                # Completely blocks glitched, unscheduled overflights like VUNQB from entering the board
                 if not is_already_tracked:
+                    if dest_iata == TARGET_IATA and not is_auto_expected and dist > 300:
+                        continue
                     if dest_iata and dest_iata not in [TARGET_IATA, "N/A", ""]:
                         continue
+                # ------------------------------------
                
                 if not is_already_tracked and dist < 60 and v_speed > 250 and dest_iata != TARGET_IATA:
                     continue
                
                 is_cjb_bound = dest_iata == TARGET_IATA
-                is_auto_expected = (norm_cs in DYNAMIC_WATCHLIST) or (f_num in DYNAMIC_WATCHLIST)
                 is_manual_expected = norm_cs in NORMALIZED_MANUAL_LIST
                 is_unannounced_arrival = (dest_iata in ["", "N/A"]) and (dist < 75) and (alt < 15000) and (v_speed < -150)
 
@@ -295,7 +300,7 @@ async def radar_loop():
                         if deep_dep:
                             final_dep_str = deep_dep
                         else:
-                            # --- UPGRADED DYNAMIC ROUTE PROFILING ---
+                            # --- FIXED ATD MATH (Removed Redundant SID Delay) ---
                             origin_iata = f.origin_airport_iata
                             if origin_iata in ORIGIN_COORDS:
                                 o_lat, o_lon = ORIGIN_COORDS[origin_iata]
@@ -303,17 +308,14 @@ async def radar_loop():
                                 total_route_dist = get_distance(o_lat, o_lon, VOCB_LAT, VOCB_LON)
                                
                                 if aircraft_type.startswith("AT") or "ATR" in aircraft_type or aircraft_type.startswith("DH"):
-                                    perf_speed = 440.0
-                                    perf_sid = 5.0
+                                    perf_speed = 430.0
                                 else:
                                     if total_route_dist < 500:
-                                        perf_speed = 620.0  # Regional hop profile
-                                        perf_sid = 4.0
+                                        perf_speed = 620.0 
                                     else:
-                                        perf_speed = 760.0  # High-altitude trunk profile
-                                        perf_sid = 6.0
+                                        perf_speed = 760.0 
                                    
-                                hours_flown = (dist_flown / perf_speed) + (perf_sid / 60.0)
+                                hours_flown = dist_flown / perf_speed
                                 atd_time = datetime.now(timezone.utc) - timedelta(hours=hours_flown)
                                 final_dep_str = "ATD: " + atd_time.strftime("%H:%M")
 
@@ -357,17 +359,14 @@ async def radar_loop():
                                 total_route_dist = get_distance(o_lat, o_lon, VOCB_LAT, VOCB_LON)
                                
                                 if aircraft_type.startswith("AT") or "ATR" in aircraft_type or aircraft_type.startswith("DH"):
-                                    perf_speed = 440.0
-                                    perf_sid = 5.0
+                                    perf_speed = 430.0
                                 else:
                                     if total_route_dist < 500:
                                         perf_speed = 620.0
-                                        perf_sid = 4.0
                                     else:
                                         perf_speed = 760.0
-                                        perf_sid = 6.0
                                    
-                                hours_flown = (dist_flown / perf_speed) + (perf_sid / 60.0)
+                                hours_flown = dist_flown / perf_speed
                                 atd_time = datetime.now(timezone.utc) - timedelta(hours=hours_flown)
                                 s["dep_time"] = "ATD: " + atd_time.strftime("%H:%M")
                         s["last_dep_check"] = now
