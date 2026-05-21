@@ -254,7 +254,10 @@ async def radar_loop():
                     angle_diff = abs((bearing - rwy_heading + 180) % 360 - 180)
                     alt_to_lose = max(0, alt - AIRPORT_ELEV)
                    
-                    decel_buffer_mins = 1.5 * (1 - (dist / 55.56)) if dist <= 55.56 else 0
+                    # --- FIXED ETA OVERHANG ---
+                    # Reduced max buffer from 1.5 mins down to 0.5 mins (30 seconds) to prevent late ATAs
+                    decel_buffer_mins = 0.5 * (1 - (dist / 55.56)) if dist <= 55.56 else 0
+                    # --------------------------
 
                     if dist <= 55.56:
                         if angle_diff < 60:
@@ -295,22 +298,25 @@ async def radar_loop():
                         if deep_dep:
                             final_dep_str = deep_dep
                         else:
-                            # --- RESTORED MATHEMATICAL CONSTANTS ---
+                            # --- DYNAMIC ATD SCALER ---
                             origin_iata = f.origin_airport_iata
                             if origin_iata in ORIGIN_COORDS:
                                 o_lat, o_lon = ORIGIN_COORDS[origin_iata]
                                 dist_flown = get_distance(o_lat, o_lon, f.latitude, f.longitude)
+                                total_route_dist = get_distance(o_lat, o_lon, VOCB_LAT, VOCB_LON)
                                
                                 if aircraft_type.startswith("AT") or "ATR" in aircraft_type or aircraft_type.startswith("DH"):
                                     perf_speed = 430.0
-                                    perf_sid = 4.0
+                                    perf_sid = 5.0
                                 else:
-                                    perf_speed = 680.0
-                                    perf_sid = 4.0
+                                    # Scales speed based on total distance: higher for SIN/DEL, lower for BOM/BLR
+                                    perf_speed = min(820.0, 580.0 + (total_route_dist / 10.0))
+                                    perf_sid = 5.0
                                    
                                 hours_flown = max(0, (dist_flown / perf_speed) + (perf_sid / 60.0))
                                 atd_time = datetime.now(timezone.utc) - timedelta(hours=hours_flown)
                                 final_dep_str = "ATD: " + atd_time.strftime("%H:%M")
+                            # --------------------------
 
                     strips[icao_id] = {
                         "callsign": norm_cs, "origin": get_icao_airport(f.origin_airport_iata) if f.origin_airport_iata else "UNK",
@@ -327,7 +333,6 @@ async def radar_loop():
                     s["distance"] = int(dist)
                     s["speed"] = gs
                    
-                    # Anti-Glitch Pruner
                     if s["distance"] > 250 and dest_iata != TARGET_IATA and not is_auto_expected:
                         del strips[icao_id]
                         continue
@@ -354,13 +359,14 @@ async def radar_loop():
                             if origin_iata in ORIGIN_COORDS:
                                 o_lat, o_lon = ORIGIN_COORDS[origin_iata]
                                 dist_flown = get_distance(o_lat, o_lon, f.latitude, f.longitude)
+                                total_route_dist = get_distance(o_lat, o_lon, VOCB_LAT, VOCB_LON)
                                
                                 if aircraft_type.startswith("AT") or "ATR" in aircraft_type or aircraft_type.startswith("DH"):
                                     perf_speed = 430.0
-                                    perf_sid = 4.0
+                                    perf_sid = 5.0
                                 else:
-                                    perf_speed = 680.0
-                                    perf_sid = 4.0
+                                    perf_speed = min(820.0, 580.0 + (total_route_dist / 10.0))
+                                    perf_sid = 5.0
                                    
                                 hours_flown = max(0, (dist_flown / perf_speed) + (perf_sid / 60.0))
                                 atd_time = datetime.now(timezone.utc) - timedelta(hours=hours_flown)
