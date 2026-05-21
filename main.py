@@ -220,11 +220,11 @@ async def radar_loop():
                         break
 
                 historical_dep = None
-                historical_min_dist = dist
+                historical_missed_approach = False
                
                 if duplicate_id:
                     historical_dep = strips[duplicate_id]["dep_time"]
-                    historical_min_dist = strips[duplicate_id].get("min_distance", dist)
+                    historical_missed_approach = strips[duplicate_id].get("initiated_missed_approach", False)
                     del strips[duplicate_id]
                 # -----------------------------------------
 
@@ -293,7 +293,7 @@ async def radar_loop():
                         "dest": "VOCB", "aircraft": f.aircraft_code if f.aircraft_code else "UNK", "speed": gs,
                         "status": init_status, "dep_time": final_dep_str, "eta": eta_str, "sort_time": eta_unix,
                         "touchdown": None, "last_seen": now, "distance": int(dist),
-                        "last_dep_check": now, "min_distance": int(historical_min_dist)
+                        "last_dep_check": now, "initiated_missed_approach": historical_missed_approach
                     }
 
                 if icao_id in strips:
@@ -301,17 +301,19 @@ async def radar_loop():
                     s["last_seen"] = now
                     s["distance"] = int(dist)
                     s["speed"] = gs
-                    s["min_distance"] = min(s.get("min_distance", int(dist)), int(dist))
                    
-                    # Touch-and-Go Pruner
-                    if s["min_distance"] < 15 and int(dist) > 55:
+                    # --- REWRITTEN STATE-BASED TOUCH-AND-GO DEPARTURE PRUNER ---
+                    # Prunes ONLY if it previously triggered a missed approach/touch-and-go AND has now flown outside 30 NM (55.56 km)
+                    if s.get("initiated_missed_approach") and dist > 55.56:
                         del strips[icao_id]
                         continue
+                    # -----------------------------------------------------------
                    
-                    # Go-Around Reversion Detector
+                    # High-Accuracy Go-Around Reversion Sensor
                     if s["status"] == "LANDED" and not on_ground and alt > (AIRPORT_ELEV + 800) and gs > 100:
                         s["status"] = "APPROACH"
                         s["touchdown"] = None
+                        s["initiated_missed_approach"] = True # Explicitly lock the state!
                    
                     if s["status"] != "LANDED":
                         s["eta"] = eta_str
@@ -486,21 +488,3 @@ html_content = """
     </script>
 </body>
 </html>
-"""
-
-@app.get("/")
-async def get_webpage():
-    return HTMLResponse(html_content)
-
-@app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    await websocket.accept()
-    try:
-        while True:
-            strips_snapshot = list(strips.items())
-            current_strips = [{"icao": k, "rwy": ACTIVE_RUNWAY, **v} for k, v in strips_snapshot]
-            current_strips.sort(key=lambda x: x["sort_time"])
-            await websocket.send_json(current_strips)
-            await asyncio.sleep(8)
-    except Exception:
-        pass
