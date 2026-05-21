@@ -49,7 +49,7 @@ def get_active_runway():
         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
         with urllib.request.urlopen(req, timeout=5) as response:
             data = response.read().decode('utf-8')
-            lines = data.split('\n')
+            lines = data.splitlines()  # Fixed multi-line parsing issue here
             if len(lines) > 1:
                 metar = lines[1]
                 for p in metar.split():
@@ -302,18 +302,16 @@ async def radar_loop():
                     s["distance"] = int(dist)
                     s["speed"] = gs
                    
-                    # --- REWRITTEN STATE-BASED TOUCH-AND-GO DEPARTURE PRUNER ---
-                    # Prunes ONLY if it previously triggered a missed approach/touch-and-go AND has now flown outside 30 NM (55.56 km)
+                    # Trajectory Pruner
                     if s.get("initiated_missed_approach") and dist > 55.56:
                         del strips[icao_id]
                         continue
-                    # -----------------------------------------------------------
                    
-                    # High-Accuracy Go-Around Reversion Sensor
+                    # Go-Around Reversion Sensor
                     if s["status"] == "LANDED" and not on_ground and alt > (AIRPORT_ELEV + 800) and gs > 100:
                         s["status"] = "APPROACH"
                         s["touchdown"] = None
-                        s["initiated_missed_approach"] = True # Explicitly lock the state!
+                        s["initiated_missed_approach"] = True
                    
                     if s["status"] != "LANDED":
                         s["eta"] = eta_str
@@ -488,3 +486,4 @@ html_content = """
     </script>
 </body>
 </html>
+"""
