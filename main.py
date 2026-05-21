@@ -186,6 +186,13 @@ async def radar_loop():
                 f_num = f_num.strip().upper().replace(" ", "") if f_num else ""
                
                 dest_iata = f.destination_airport_iata
+               
+                # --- STRATEGIC DESTINATION FIREWALL ---
+                # Immediately drop any flight explicitly routed to another airfield
+                if dest_iata and dest_iata not in [TARGET_IATA, "N/A", ""]:
+                    continue
+                # --------------------------------------
+
                 dist = get_distance(f.latitude, f.longitude, VOCB_LAT, VOCB_LON)
                 alt = f.altitude
                 gs = f.ground_speed
@@ -200,13 +207,10 @@ async def radar_loop():
                 is_auto_expected = (norm_cs in DYNAMIC_WATCHLIST) or (f_num in DYNAMIC_WATCHLIST)
                 is_manual_expected = norm_cs in NORMALIZED_MANUAL_LIST
                 is_unannounced_arrival = (dest_iata in ["", "N/A"]) and (dist < 75) and (alt < 15000) and (v_speed < -150)
-               
-                DOMESTIC_CARRIERS = ("IGO", "AIC", "VTI", "SEJ", "IAD", "AXB", "AKJ", "LLR")
-                is_local_carrier_bubble = norm_cs.startswith(DOMESTIC_CARRIERS) and (dist < 60) and (alt < 15000)
 
                 is_qualified = (
                     is_already_tracked or is_cjb_bound or is_auto_expected or
-                    is_manual_expected or is_unannounced_arrival or is_local_carrier_bubble
+                    is_manual_expected or is_unannounced_arrival
                 )
                
                 if not is_qualified:
@@ -280,19 +284,17 @@ async def radar_loop():
                         if deep_dep:
                             final_dep_str = deep_dep
                         else:
-                            # --- DYNAMIC STRUCTURAL PERFORMANCE PROFILER ---
                             origin_iata = f.origin_airport_iata
                             if origin_iata in ORIGIN_COORDS:
                                 o_lat, o_lon = ORIGIN_COORDS[origin_iata]
                                 dist_flown = get_distance(o_lat, o_lon, f.latitude, f.longitude)
                                
-                                # Split profiles dynamically based on jet vs regional turboprop class
                                 if aircraft_type.startswith("AT") or "ATR" in aircraft_type or aircraft_type.startswith("DH"):
-                                    perf_speed = 430.0  # ATR block cruise speed (km/h)
-                                    perf_sid = 8.0     # Shorter terminal path vector profile
+                                    perf_speed = 430.0
+                                    perf_sid = 8.0
                                 else:
-                                    perf_speed = 680.0  # Airbus/Boeing block cruise speed (km/h)
-                                    perf_sid = 10.0    # Jet climb/SID vector buffer
+                                    perf_speed = 680.0
+                                    perf_sid = 10.0
                                    
                                 hours_flown = (dist_flown / perf_speed) + (perf_sid / 60.0)
                                 atd_time = datetime.now(timezone.utc) - timedelta(hours=hours_flown)
@@ -332,7 +334,6 @@ async def radar_loop():
                         if deep_dep:
                             s["dep_time"] = deep_dep
                         else:
-                            # Keep profile matrices consistent during loop refreshes
                             origin_iata = f.origin_airport_iata
                             if origin_iata in ORIGIN_COORDS:
                                 o_lat, o_lon = ORIGIN_COORDS[origin_iata]
