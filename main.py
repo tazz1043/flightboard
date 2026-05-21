@@ -301,18 +301,24 @@ async def radar_loop():
                                 dist_flown = get_distance(o_lat, o_lon, f.latitude, f.longitude)
                                 total_route_dist = get_distance(o_lat, o_lon, VOCB_LAT, VOCB_LON)
                                
-                                # --- PERFECTED DEEP CRUISE GRADIENT ---
+                                # --- NEW: SEGMENTED ROUTE PROFILER ---
                                 if aircraft_type.startswith("AT") or "ATR" in aircraft_type or aircraft_type.startswith("DH"):
                                     perf_speed = 430.0
                                 else:
-                                    # Base speed 630. Adds 1 km/h for every 25km of total route distance. Capped at 850 km/h.
-                                    perf_speed = min(850.0, 630.0 + (total_route_dist / 25.0))
+                                    if total_route_dist < 500:
+                                        perf_speed = 640.0  # Short hops (e.g., Chennai, Bangalore)
+                                    elif total_route_dist < 1500:
+                                        perf_speed = 670.0  # Medium trunks (e.g., Mumbai, Hyderabad)
+                                    elif total_route_dist < 2400:
+                                        perf_speed = 690.0  # Long trunks (e.g., Delhi, Kolkata)
+                                    else:
+                                        perf_speed = 760.0  # International ultra-long (e.g., Sharjah, Singapore)
                                    
                                 perf_sid = 4.0
                                 hours_flown = max(0, (dist_flown / perf_speed) + (perf_sid / 60.0))
                                 atd_time = datetime.now(timezone.utc) - timedelta(hours=hours_flown)
                                 final_dep_str = "ATD: " + atd_time.strftime("%H:%M")
-                                # --------------------------------------
+                                # -------------------------------------
 
                     strips[icao_id] = {
                         "callsign": norm_cs, "origin": get_icao_airport(f.origin_airport_iata) if f.origin_airport_iata else "UNK",
@@ -360,7 +366,14 @@ async def radar_loop():
                                 if aircraft_type.startswith("AT") or "ATR" in aircraft_type or aircraft_type.startswith("DH"):
                                     perf_speed = 430.0
                                 else:
-                                    perf_speed = min(850.0, 630.0 + (total_route_dist / 25.0))
+                                    if total_route_dist < 500:
+                                        perf_speed = 640.0
+                                    elif total_route_dist < 1500:
+                                        perf_speed = 670.0
+                                    elif total_route_dist < 2400:
+                                        perf_speed = 690.0
+                                    else:
+                                        perf_speed = 760.0
                                    
                                 perf_sid = 4.0
                                 hours_flown = max(0, (dist_flown / perf_speed) + (perf_sid / 60.0))
