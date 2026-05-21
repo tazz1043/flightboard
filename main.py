@@ -301,18 +301,15 @@ async def radar_loop():
                                 dist_flown = get_distance(o_lat, o_lon, f.latitude, f.longitude)
                                 total_route_dist = get_distance(o_lat, o_lon, VOCB_LAT, VOCB_LON)
                                
-                                # --- NEW: EMPIRICAL BLOCK SPEED CURVE ---
                                 if aircraft_type.startswith("AT") or "ATR" in aircraft_type or aircraft_type.startswith("DH"):
                                     perf_speed = 430.0
                                 else:
-                                    # Dynamically adds speed based on how far the origin is
                                     perf_speed = 650.0 + (total_route_dist / 50.0)
                                    
                                 perf_sid = 4.0
                                 hours_flown = max(0, (dist_flown / perf_speed) + (perf_sid / 60.0))
                                 atd_time = datetime.now(timezone.utc) - timedelta(hours=hours_flown)
                                 final_dep_str = "ATD: " + atd_time.strftime("%H:%M")
-                                # ----------------------------------------
 
                     strips[icao_id] = {
                         "callsign": norm_cs, "origin": get_icao_airport(f.origin_airport_iata) if f.origin_airport_iata else "UNK",
@@ -528,3 +525,21 @@ html_content = """
     </script>
 </body>
 </html>
+"""
+
+@app.get("/")
+async def get_webpage():
+    return HTMLResponse(html_content)
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    try:
+        while True:
+            strips_snapshot = list(strips.items())
+            current_strips = [{"icao": k, "rwy": ACTIVE_RUNWAY, **v} for k, v in strips_snapshot]
+            current_strips.sort(key=lambda x: x["sort_time"])
+            await websocket.send_json(current_strips)
+            await asyncio.sleep(8)
+    except Exception:
+        pass
