@@ -329,17 +329,18 @@ async def radar_loop():
                 if icao_id in strips:
                     s = strips[icao_id]
                     s["last_seen"] = now
-                    s["distance"] = int(dist)
-                    s["speed"] = gs
                    
                     # --- TELEPORTATION DETECTION PRUNER ---
-                    # Checks if a plane mathematically "teleported" over 150km instantly (A pure API glitch).
-                    # Safely ignores planes that simply lose their destination metadata while cruising.
+                    # Protects valid flights like ABY410 from being deleted if they lose destination metadata.
+                    # Only deletes a plane if it mathematically "teleports" backwards over 150km (an API coordinate glitch).
                     if dist > 250 and s.get("last_real_distance", dist) < 100:
                         del strips[icao_id]
                         continue
-                    s["last_real_distance"] = dist
                     # --------------------------------------
+                   
+                    s["last_real_distance"] = dist
+                    s["distance"] = int(dist)
+                    s["speed"] = gs
 
                     if s.get("initiated_missed_approach") and dist > 55.56:
                         del strips[icao_id]
