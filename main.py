@@ -173,11 +173,35 @@ async def radar_loop():
                 if not f.latitude or not f.longitude: continue
                
                 icao_id = f.id
-                norm_cs = normalize_callsign(f.callsign)
-                if not norm_cs or norm_cs == "UNK": continue
                
+                # Process physics and location BEFORE filtering callsigns
+                dist = get_distance(f.latitude, f.longitude, VOCB_LAT, VOCB_LON)
+                alt = f.altitude
+                gs = f.ground_speed
+                v_speed = f.vertical_speed if f.vertical_speed is not None else 0
+                on_ground = f.on_ground == 1
+                dest_iata = f.destination_airport_iata
                 aircraft_type = f.aircraft_code.upper() if f.aircraft_code else ""
                
+                norm_cs = normalize_callsign(f.callsign)
+
+                # --- NEW: SPATIAL MLAT CORRELATION ---
+                # If radar strips the callsign, look for a known arrival in the exact same physical spot
+                if norm_cs == "UNK":
+                    for existing_id, s in list(strips.items()):
+                        if s["status"] != "LANDED" and (now - s["last_seen"]) > 10:
+                            time_diff = now - s["last_seen"]
+                            speed_km_sec = max(s["speed"], 140) * 0.000514
+                            expected_dist = s.get("last_real_distance", s["distance"]) - (speed_km_sec * time_diff)
+                           
+                            # If the nameless blip is within 8km of where the lost plane should be, stitch it!
+                            if abs(dist - expected_dist) < 8.0:
+                                norm_cs = s["callsign"]
+                                break
+                               
+                if not norm_cs or norm_cs == "UNK": continue
+                # -------------------------------------
+
                 TACTICAL_CALLSIGNS = ("IFC", "RAVEN", "SARANG", "TEJAS", "IAF", "VAYU", "SULUR", "DEF", "K1", "K2", "CHETAK")
                 MILITARY_AIRCRAFT = ("SU30", "LCA", "AN32", "IL76", "C17", "C130", "HAWK", "D228")
                
@@ -187,14 +211,7 @@ async def radar_loop():
                 f_num = getattr(f, 'number', '')
                 f_num = f_num.strip().upper().replace(" ", "") if f_num else ""
                
-                dest_iata = f.destination_airport_iata
-                dist = get_distance(f.latitude, f.longitude, VOCB_LAT, VOCB_LON)
-                alt = f.altitude
-                gs = f.ground_speed
-                v_speed = f.vertical_speed if f.vertical_speed is not None else 0
-                on_ground = f.on_ground == 1
-               
-                # --- SENSOR HANDOVER CHECK (FIRST PRIORITY) ---
+                # --- SENSOR HANDOVER ID STITCHING ---
                 duplicate_id = None
                 for existing_id, strip_data in list(strips.items()):
                     if strip_data["callsign"] == norm_cs and strip_data["status"] != "LANDED":
@@ -304,13 +321,14 @@ async def radar_loop():
                         "callsign": norm_cs, "origin": get_icao_airport(f.origin_airport_iata) if f.origin_airport_iata else "UNK",
                         "dest": "VOCB", "aircraft": f.aircraft_code if f.aircraft_code else "UNK", "speed": gs,
                         "status": init_status, "dep_time": final_dep_str, "eta": eta_str, "sort_time": eta_unix,
-                        "touchdown": None, "last_seen": now, "distance": int(dist),
+                        "touchdown": None, "last_seen": now, "distance": int(dist), "last_real_distance": dist,
                         "last_dep_check": now, "initiated_missed_approach": historical_missed_approach
                     }
 
                 if icao_id in strips:
                     s = strips[icao_id]
                     s["last_seen"] = now
+                    s["last_real_distance"] = dist
                     s["distance"] = int(dist)
                     s["speed"] = gs
                    
@@ -351,7 +369,6 @@ async def radar_loop():
                    
                     if s["status"] == "EN ROUTE" and dist < 100: s["status"] = "APPROACH"
                    
-                    # 3D Terminal Geofence Touchdown Monitor
                     if s["status"] == "APPROACH":
                         if on_ground or (dist < 3.0 and alt <= (AIRPORT_ELEV + 2000)):
                             if s["status"] != "LANDED":
@@ -367,21 +384,27 @@ async def radar_loop():
             s = strips[k]
             time_lost = now - s["last_seen"]
            
-            # --- HIGH-PRECISION BLIND PREDICTOR UPGRADE ---
-            # Radius tightened to 6km (3 NM) and network lag tolerance raised to 75 seconds
-            if s["status"] == "APPROACH" and s["distance"] < 6 and time_lost > 75:
-                speed_km_sec = 260.0 / 3600.0
-                seconds_to_runway = s["distance"] / speed_km_sec
-                exact_td_unix = s["last_seen"] + seconds_to_runway
+            # --- NEW: ACTIVE DEAD-RECKONING (GHOST MODE) ---
+            # If the signal drops in the mountain shadow, the engine actively flies the plane to 0 km.
+            if s["status"] == "APPROACH" and s.get("last_real_distance", 999) < 45 and time_lost > 30:
+                speed_km_sec = max(s["speed"], 140) * 0.000514
+                ghost_dist = s["last_real_distance"] - (speed_km_sec * time_lost)
                
-                # SANTIY BARRIER: Never print a touchdown time that lies in the future
-                if now >= exact_td_unix:
-                    s["status"] = "LANDED"
-                    exact_td_time = datetime.fromtimestamp(exact_td_unix, timezone.utc)
-                    s["touchdown"] = exact_td_time.strftime("%H:%M:%S")
-                    s["sort_time"] = exact_td_unix
-                    s["last_seen"] = now
-            # -----------------------------------------------
+                if ghost_dist <= 0:
+                    if s["status"] != "LANDED":
+                        exact_td_unix = s["last_seen"] + (s["last_real_distance"] / speed_km_sec)
+                        # Sanity Check: Ensure we never print a touchdown time that is in the future
+                        if now >= exact_td_unix:
+                            s["status"] = "LANDED"
+                            s["distance"] = 0
+                            exact_td_time = datetime.fromtimestamp(exact_td_unix, timezone.utc)
+                            s["touchdown"] = exact_td_time.strftime("%H:%M:%S")
+                            s["sort_time"] = exact_td_unix
+                            s["last_seen"] = now  # Reset the clock to lock it on the board
+                else:
+                    # Dynamically update the visual distance on the screen while tracking is lost
+                    s["distance"] = int(max(1, ghost_dist))
+            # ------------------------------------------------
                
             elif time_lost > 900: del strips[k]
            
