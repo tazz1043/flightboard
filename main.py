@@ -174,6 +174,8 @@ async def radar_loop():
                
                 icao_id = f.id
                 norm_cs = normalize_callsign(f.callsign)
+                if not norm_cs or norm_cs == "UNK": continue
+               
                 aircraft_type = f.aircraft_code.upper() if f.aircraft_code else ""
                
                 TACTICAL_CALLSIGNS = ("IFC", "RAVEN", "SARANG", "TEJAS", "IAF", "VAYU", "SULUR", "DEF", "K1", "K2", "CHETAK")
@@ -186,23 +188,32 @@ async def radar_loop():
                 f_num = f_num.strip().upper().replace(" ", "") if f_num else ""
                
                 dest_iata = f.destination_airport_iata
-               
-                # --- STRATEGIC DESTINATION FIREWALL ---
-                # Immediately drop any flight explicitly routed to another airfield
-                if dest_iata and dest_iata not in [TARGET_IATA, "N/A", ""]:
-                    continue
-                # --------------------------------------
-
                 dist = get_distance(f.latitude, f.longitude, VOCB_LAT, VOCB_LON)
                 alt = f.altitude
                 gs = f.ground_speed
                 v_speed = f.vertical_speed if f.vertical_speed is not None else 0
                 on_ground = f.on_ground == 1
                
-                if dist < 60 and v_speed > 250 and icao_id not in strips and dest_iata != TARGET_IATA:
+                # --- SENSOR HANDOVER CHECK (FIRST PRIORITY) ---
+                # Check callsign records to see if this is an active handover update
+                duplicate_id = None
+                for existing_id, strip_data in list(strips.items()):
+                    if strip_data["callsign"] == norm_cs and strip_data["status"] != "LANDED":
+                        if existing_id != icao_id:
+                            duplicate_id = existing_id
+                        break
+
+                # The Tracking Shield: Active ongoing flights bypass firewall evaluations entirely
+                is_already_tracked = (icao_id in strips) or (duplicate_id is not None)
+               
+                # Apply destination firewall rules ONLY to brand new untracked tracks
+                if not is_already_tracked:
+                    if dest_iata and dest_iata not in [TARGET_IATA, "N/A", ""]:
+                        continue
+               
+                if not is_already_tracked and dist < 60 and v_speed > 250 and dest_iata != TARGET_IATA:
                     continue
                
-                is_already_tracked = icao_id in strips
                 is_cjb_bound = dest_iata == TARGET_IATA
                 is_auto_expected = (norm_cs in DYNAMIC_WATCHLIST) or (f_num in DYNAMIC_WATCHLIST)
                 is_manual_expected = norm_cs in NORMALIZED_MANUAL_LIST
@@ -216,13 +227,7 @@ async def radar_loop():
                 if not is_qualified:
                     continue
 
-                # --- SENSOR HANDOVER ID STITCHING ---
-                duplicate_id = None
-                for existing_id, strip_data in list(strips.items()):
-                    if strip_data["callsign"] == norm_cs and existing_id != icao_id and strip_data["status"] != "LANDED":
-                        duplicate_id = existing_id
-                        break
-
+                # Complete Handover Stitching process
                 historical_dep = None
                 historical_missed_approach = False
                
@@ -230,7 +235,6 @@ async def radar_loop():
                     historical_dep = strips[duplicate_id]["dep_time"]
                     historical_missed_approach = strips[duplicate_id].get("initiated_missed_approach", False)
                     del strips[duplicate_id]
-                # -----------------------------------------
 
                 current_watchlist_dep = DYNAMIC_WATCHLIST.get(norm_cs) or DYNAMIC_WATCHLIST.get(f_num) or "DEP: --:--"
                
