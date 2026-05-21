@@ -280,11 +280,21 @@ async def radar_loop():
                         if deep_dep:
                             final_dep_str = deep_dep
                         else:
+                            # --- DYNAMIC STRUCTURAL PERFORMANCE PROFILER ---
                             origin_iata = f.origin_airport_iata
                             if origin_iata in ORIGIN_COORDS:
                                 o_lat, o_lon = ORIGIN_COORDS[origin_iata]
                                 dist_flown = get_distance(o_lat, o_lon, f.latitude, f.longitude)
-                                hours_flown = dist_flown / 650.0
+                               
+                                # Split profiles dynamically based on jet vs regional turboprop class
+                                if aircraft_type.startswith("AT") or "ATR" in aircraft_type or aircraft_type.startswith("DH"):
+                                    perf_speed = 430.0  # ATR block cruise speed (km/h)
+                                    perf_sid = 8.0     # Shorter terminal path vector profile
+                                else:
+                                    perf_speed = 680.0  # Airbus/Boeing block cruise speed (km/h)
+                                    perf_sid = 10.0    # Jet climb/SID vector buffer
+                                   
+                                hours_flown = (dist_flown / perf_speed) + (perf_sid / 60.0)
                                 atd_time = datetime.now(timezone.utc) - timedelta(hours=hours_flown)
                                 final_dep_str = "ATD: " + atd_time.strftime("%H:%M")
 
@@ -322,11 +332,20 @@ async def radar_loop():
                         if deep_dep:
                             s["dep_time"] = deep_dep
                         else:
+                            # Keep profile matrices consistent during loop refreshes
                             origin_iata = f.origin_airport_iata
                             if origin_iata in ORIGIN_COORDS:
                                 o_lat, o_lon = ORIGIN_COORDS[origin_iata]
                                 dist_flown = get_distance(o_lat, o_lon, f.latitude, f.longitude)
-                                hours_flown = dist_flown / 650.0
+                               
+                                if aircraft_type.startswith("AT") or "ATR" in aircraft_type or aircraft_type.startswith("DH"):
+                                    perf_speed = 430.0
+                                    perf_sid = 8.0
+                                else:
+                                    perf_speed = 680.0
+                                    perf_sid = 10.0
+                                   
+                                hours_flown = (dist_flown / perf_speed) + (perf_sid / 60.0)
                                 atd_time = datetime.now(timezone.utc) - timedelta(hours=hours_flown)
                                 s["dep_time"] = "ATD: " + atd_time.strftime("%H:%M")
                         s["last_dep_check"] = now
@@ -488,7 +507,6 @@ html_content = """
 </html>
 """
 
-# --- THE MISSING ENDPOINTS (THE REASON FOR THE 404) ---
 @app.get("/")
 async def get_webpage():
     return HTMLResponse(html_content)
