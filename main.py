@@ -301,24 +301,22 @@ async def radar_loop():
                                 dist_flown = get_distance(o_lat, o_lon, f.latitude, f.longitude)
                                 total_route_dist = get_distance(o_lat, o_lon, VOCB_LAT, VOCB_LON)
                                
-                                # --- NEW: SEGMENTED ROUTE PROFILER ---
                                 if aircraft_type.startswith("AT") or "ATR" in aircraft_type or aircraft_type.startswith("DH"):
                                     perf_speed = 430.0
                                 else:
                                     if total_route_dist < 500:
-                                        perf_speed = 640.0  # Short hops (e.g., Chennai, Bangalore)
+                                        perf_speed = 640.0
                                     elif total_route_dist < 1500:
-                                        perf_speed = 670.0  # Medium trunks (e.g., Mumbai, Hyderabad)
+                                        perf_speed = 670.0
                                     elif total_route_dist < 2400:
-                                        perf_speed = 690.0  # Long trunks (e.g., Delhi, Kolkata)
+                                        perf_speed = 690.0
                                     else:
-                                        perf_speed = 760.0  # International ultra-long (e.g., Sharjah, Singapore)
+                                        perf_speed = 760.0
                                    
                                 perf_sid = 4.0
                                 hours_flown = max(0, (dist_flown / perf_speed) + (perf_sid / 60.0))
                                 atd_time = datetime.now(timezone.utc) - timedelta(hours=hours_flown)
                                 final_dep_str = "ATD: " + atd_time.strftime("%H:%M")
-                                # -------------------------------------
 
                     strips[icao_id] = {
                         "callsign": norm_cs, "origin": get_icao_airport(f.origin_airport_iata) if f.origin_airport_iata else "UNK",
@@ -331,13 +329,17 @@ async def radar_loop():
                 if icao_id in strips:
                     s = strips[icao_id]
                     s["last_seen"] = now
-                    s["last_real_distance"] = dist
                     s["distance"] = int(dist)
                     s["speed"] = gs
                    
-                    if s["distance"] > 250 and dest_iata != TARGET_IATA and not is_auto_expected:
+                    # --- TELEPORTATION DETECTION PRUNER ---
+                    # Checks if a plane mathematically "teleported" over 150km instantly (A pure API glitch).
+                    # Safely ignores planes that simply lose their destination metadata while cruising.
+                    if dist > 250 and s.get("last_real_distance", dist) < 100:
                         del strips[icao_id]
                         continue
+                    s["last_real_distance"] = dist
+                    # --------------------------------------
 
                     if s.get("initiated_missed_approach") and dist > 55.56:
                         del strips[icao_id]
