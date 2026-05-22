@@ -197,11 +197,14 @@ async def radar_loop():
                                
                 if not norm_cs or norm_cs == "UNK": continue
 
-                TACTICAL_CALLSIGNS = ("IFC", "RAVEN", "SARANG", "TEJAS", "IAF", "VAYU", "SULUR", "DEF", "K1", "K2", "CHETAK")
+                # --- IAF MILITARY LOOPHOLE FIX ---
+                # Added "VU" to the filter to block VIP/IAF aircraft utilizing tail registrations as callsigns.
+                TACTICAL_CALLSIGNS = ("IFC", "RAVEN", "SARANG", "TEJAS", "IAF", "VAYU", "SULUR", "DEF", "K1", "K2", "CHETAK", "VU")
                 MILITARY_AIRCRAFT = ("SU30", "LCA", "AN32", "IL76", "C17", "C130", "HAWK", "D228")
                
                 if norm_cs.startswith(TACTICAL_CALLSIGNS) or aircraft_type.startswith(MILITARY_AIRCRAFT):
                     continue
+                # ---------------------------------
                
                 f_num = getattr(f, 'number', '')
                 f_num = f_num.strip().upper().replace(" ", "") if f_num else ""
@@ -300,18 +303,16 @@ async def radar_loop():
                                 o_lat, o_lon = ORIGIN_COORDS[origin_iata]
                                 dist_flown = get_distance(o_lat, o_lon, f.latitude, f.longitude)
                                
-                                # --- BRACKETED ATD FIX ---
                                 if aircraft_type.startswith("AT") or "ATR" in aircraft_type or aircraft_type.startswith("DH"):
                                     perf_speed = 380.0
-                                    perf_sid = 4.0      # Keeps ATR exactly at 02:54
+                                    perf_sid = 4.0     
                                 else:
                                     perf_speed = 680.0
-                                    perf_sid = 2.0      # Averages Jet between 02:55 and 03:01 to hit 02:59
+                                    perf_sid = 0.0     
                                    
                                 hours_flown = max(0, (dist_flown / perf_speed) + (perf_sid / 60.0))
                                 atd_time = datetime.now(timezone.utc) - timedelta(hours=hours_flown)
                                 final_dep_str = "ATD: " + atd_time.strftime("%H:%M")
-                                # -------------------------
 
                     strips[icao_id] = {
                         "callsign": norm_cs, "origin": get_icao_airport(f.origin_airport_iata) if f.origin_airport_iata else "UNK",
@@ -324,12 +325,6 @@ async def radar_loop():
                 if icao_id in strips:
                     s = strips[icao_id]
                     s["last_seen"] = now
-                   
-                    # Teleportation Filter prevents actual glitches but allows metadata drops to stay
-                    if dist > 250 and s.get("last_real_distance", dist) < 100:
-                        del strips[icao_id]
-                        continue
-                       
                     s["last_real_distance"] = dist
                     s["distance"] = int(dist)
                     s["speed"] = gs
@@ -338,6 +333,8 @@ async def radar_loop():
                         del strips[icao_id]
                         continue
                    
+                    # --- RECALIBRATED LANDING GEOFENCE ---
+                    # Shrunk trigger from 3.0km/2000ft down to 1.2km/800ft AGL to hold ETA until the threshold.
                     if s["status"] == "LANDED" and not on_ground and alt > (AIRPORT_ELEV + 800) and gs > 100:
                         s["status"] = "APPROACH"
                         s["touchdown"] = None
@@ -362,7 +359,7 @@ async def radar_loop():
                                     perf_sid = 4.0
                                 else:
                                     perf_speed = 680.0
-                                    perf_sid = 2.0
+                                    perf_sid = 0.0
                                    
                                 hours_flown = max(0, (dist_flown / perf_speed) + (perf_sid / 60.0))
                                 atd_time = datetime.now(timezone.utc) - timedelta(hours=hours_flown)
@@ -372,12 +369,14 @@ async def radar_loop():
                     if s["status"] == "EN ROUTE" and dist < 100: s["status"] = "APPROACH"
                    
                     if s["status"] == "APPROACH":
-                        if on_ground or (dist < 3.0 and alt <= (AIRPORT_ELEV + 2000)):
+                        # Geofence reduced to 1.2km and 800ft to stop premature ATA timestamps
+                        if on_ground or (dist < 1.2 and alt <= (AIRPORT_ELEV + 800)):
                             if s["status"] != "LANDED":
                                 s["status"] = "LANDED"
                                 td_time = datetime.now(timezone.utc)
                                 s["touchdown"] = td_time.strftime("%H:%M:%S")
                                 s["sort_time"] = td_time.timestamp()
+                    # -------------------------------------
 
         except Exception as e: print(f"Radar polling error: {e}")
 
@@ -386,13 +385,11 @@ async def radar_loop():
             s = strips[k]
             time_lost = now - s["last_seen"]
            
-            # --- WIDENED GHOST PROTOCOL ---
-            # Increased capture radius to 85km to catch low-flying ATRs dropping into the mountain shadow early.
-            if s["status"] == "APPROACH" and s.get("last_real_distance", 999) < 85 and time_lost > 30:
+            if s["status"] == "APPROACH" and s.get("last_real_distance", 999) < 45 and time_lost > 30:
                 speed_km_sec = max(s["speed"], 140) * 0.000514
                 ghost_dist = s["last_real_distance"] - (speed_km_sec * time_lost)
                
-                if ghost_dist <= 0:
+                if ghost_dist <= 0 or (s["distance"] < 6 and time_lost > 75):
                     if s["status"] != "LANDED":
                         exact_td_unix = s["last_seen"] + (s["last_real_distance"] / speed_km_sec)
                         if now >= exact_td_unix:
@@ -405,9 +402,7 @@ async def radar_loop():
                 else:
                     s["distance"] = int(max(1, ghost_dist))
                
-            # Increased timeout memory to 30 minutes (1800 seconds) for deep shadow recovery.
-            elif time_lost > 1800: del strips[k]
-            # ------------------------------
+            elif time_lost > 900: del strips[k]
            
         await asyncio.sleep(8)
 
