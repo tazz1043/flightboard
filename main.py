@@ -303,17 +303,11 @@ async def radar_loop():
                                
                                 if aircraft_type.startswith("AT") or "ATR" in aircraft_type or aircraft_type.startswith("DH"):
                                     perf_speed = 430.0
+                                    perf_sid = 4.0
                                 else:
-                                    if total_route_dist < 500:
-                                        perf_speed = 640.0
-                                    elif total_route_dist < 1500:
-                                        perf_speed = 670.0
-                                    elif total_route_dist < 2400:
-                                        perf_speed = 690.0
-                                    else:
-                                        perf_speed = 760.0
+                                    perf_speed = min(850.0, 630.0 + (total_route_dist / 25.0))
+                                    perf_sid = 1.0
                                    
-                                perf_sid = 4.0
                                 hours_flown = max(0, (dist_flown / perf_speed) + (perf_sid / 60.0))
                                 atd_time = datetime.now(timezone.utc) - timedelta(hours=hours_flown)
                                 final_dep_str = "ATD: " + atd_time.strftime("%H:%M")
@@ -331,8 +325,6 @@ async def radar_loop():
                     s["last_seen"] = now
                    
                     # --- TELEPORTATION DETECTION PRUNER ---
-                    # Protects valid flights like ABY410 from being deleted if they lose destination metadata.
-                    # Only deletes a plane if it mathematically "teleports" backwards over 150km (an API coordinate glitch).
                     if dist > 250 and s.get("last_real_distance", dist) < 100:
                         del strips[icao_id]
                         continue
@@ -368,17 +360,11 @@ async def radar_loop():
                                
                                 if aircraft_type.startswith("AT") or "ATR" in aircraft_type or aircraft_type.startswith("DH"):
                                     perf_speed = 430.0
+                                    perf_sid = 4.0
                                 else:
-                                    if total_route_dist < 500:
-                                        perf_speed = 640.0
-                                    elif total_route_dist < 1500:
-                                        perf_speed = 670.0
-                                    elif total_route_dist < 2400:
-                                        perf_speed = 690.0
-                                    else:
-                                        perf_speed = 760.0
+                                    perf_speed = min(850.0, 630.0 + (total_route_dist / 25.0))
+                                    perf_sid = 1.0
                                    
-                                perf_sid = 4.0
                                 hours_flown = max(0, (dist_flown / perf_speed) + (perf_sid / 60.0))
                                 atd_time = datetime.now(timezone.utc) - timedelta(hours=hours_flown)
                                 s["dep_time"] = "ATD: " + atd_time.strftime("%H:%M")
