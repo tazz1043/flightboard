@@ -300,18 +300,18 @@ async def radar_loop():
                                 o_lat, o_lon = ORIGIN_COORDS[origin_iata]
                                 dist_flown = get_distance(o_lat, o_lon, f.latitude, f.longitude)
                                
-                                # --- PERFECTLY TUNED ATD MATH ---
+                                # --- BRACKETED ATD FIX ---
                                 if aircraft_type.startswith("AT") or "ATR" in aircraft_type or aircraft_type.startswith("DH"):
                                     perf_speed = 380.0
-                                    perf_sid = 4.0      # Snaps ATR forward 1 min to hit 02:54
+                                    perf_sid = 4.0      # Keeps ATR exactly at 02:54
                                 else:
                                     perf_speed = 680.0
-                                    perf_sid = 0.0      # Snaps Jets forward 4 min to hit 02:59
+                                    perf_sid = 2.0      # Averages Jet between 02:55 and 03:01 to hit 02:59
                                    
                                 hours_flown = max(0, (dist_flown / perf_speed) + (perf_sid / 60.0))
                                 atd_time = datetime.now(timezone.utc) - timedelta(hours=hours_flown)
                                 final_dep_str = "ATD: " + atd_time.strftime("%H:%M")
-                                # --------------------------------
+                                # -------------------------
 
                     strips[icao_id] = {
                         "callsign": norm_cs, "origin": get_icao_airport(f.origin_airport_iata) if f.origin_airport_iata else "UNK",
@@ -362,7 +362,7 @@ async def radar_loop():
                                     perf_sid = 4.0
                                 else:
                                     perf_speed = 680.0
-                                    perf_sid = 0.0
+                                    perf_sid = 2.0
                                    
                                 hours_flown = max(0, (dist_flown / perf_speed) + (perf_sid / 60.0))
                                 atd_time = datetime.now(timezone.utc) - timedelta(hours=hours_flown)
@@ -386,7 +386,9 @@ async def radar_loop():
             s = strips[k]
             time_lost = now - s["last_seen"]
            
-            if s["status"] == "APPROACH" and s.get("last_real_distance", 999) < 45 and time_lost > 30:
+            # --- WIDENED GHOST PROTOCOL ---
+            # Increased capture radius to 85km to catch low-flying ATRs dropping into the mountain shadow early.
+            if s["status"] == "APPROACH" and s.get("last_real_distance", 999) < 85 and time_lost > 30:
                 speed_km_sec = max(s["speed"], 140) * 0.000514
                 ghost_dist = s["last_real_distance"] - (speed_km_sec * time_lost)
                
@@ -403,7 +405,9 @@ async def radar_loop():
                 else:
                     s["distance"] = int(max(1, ghost_dist))
                
-            elif time_lost > 900: del strips[k]
+            # Increased timeout memory to 30 minutes (1800 seconds) for deep shadow recovery.
+            elif time_lost > 1800: del strips[k]
+            # ------------------------------
            
         await asyncio.sleep(8)
 
