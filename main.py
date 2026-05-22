@@ -301,17 +301,18 @@ async def radar_loop():
                                 dist_flown = get_distance(o_lat, o_lon, f.latitude, f.longitude)
                                 total_route_dist = get_distance(o_lat, o_lon, VOCB_LAT, VOCB_LON)
                                
-                                # --- UNIFIED SID PROFILE ---
+                                # --- ISOLATED TURBOPROP MATH ---
                                 if aircraft_type.startswith("AT") or "ATR" in aircraft_type or aircraft_type.startswith("DH"):
-                                    perf_speed = 430.0
+                                    perf_speed = 380.0  # Reduced to reflect actual block speed
+                                    perf_sid = 5.0      # Restored climb delay to stretch flight time by 8 mins
                                 else:
                                     perf_speed = min(850.0, 630.0 + (total_route_dist / 25.0))
+                                    perf_sid = 1.0      # Jets remain perfect
                                    
-                                perf_sid = 1.0  # Universally applied 1.0m climb penalty to fix ATR gap
                                 hours_flown = max(0, (dist_flown / perf_speed) + (perf_sid / 60.0))
                                 atd_time = datetime.now(timezone.utc) - timedelta(hours=hours_flown)
                                 final_dep_str = "ATD: " + atd_time.strftime("%H:%M")
-                                # ---------------------------
+                                # -------------------------------
 
                     strips[icao_id] = {
                         "callsign": norm_cs, "origin": get_icao_airport(f.origin_airport_iata) if f.origin_airport_iata else "UNK",
@@ -325,12 +326,10 @@ async def radar_loop():
                     s = strips[icao_id]
                     s["last_seen"] = now
                    
-                    # --- TELEPORTATION DETECTION PRUNER ---
                     if dist > 250 and s.get("last_real_distance", dist) < 100:
                         del strips[icao_id]
                         continue
-                    # --------------------------------------
-                   
+                       
                     s["last_real_distance"] = dist
                     s["distance"] = int(dist)
                     s["speed"] = gs
@@ -360,11 +359,12 @@ async def radar_loop():
                                 total_route_dist = get_distance(o_lat, o_lon, VOCB_LAT, VOCB_LON)
                                
                                 if aircraft_type.startswith("AT") or "ATR" in aircraft_type or aircraft_type.startswith("DH"):
-                                    perf_speed = 430.0
+                                    perf_speed = 380.0
+                                    perf_sid = 5.0
                                 else:
                                     perf_speed = min(850.0, 630.0 + (total_route_dist / 25.0))
+                                    perf_sid = 1.0
                                    
-                                perf_sid = 1.0  # Universally applied
                                 hours_flown = max(0, (dist_flown / perf_speed) + (perf_sid / 60.0))
                                 atd_time = datetime.now(timezone.utc) - timedelta(hours=hours_flown)
                                 s["dep_time"] = "ATD: " + atd_time.strftime("%H:%M")
