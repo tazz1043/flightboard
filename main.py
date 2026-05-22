@@ -300,18 +300,18 @@ async def radar_loop():
                                 o_lat, o_lon = ORIGIN_COORDS[origin_iata]
                                 dist_flown = get_distance(o_lat, o_lon, f.latitude, f.longitude)
                                
-                                # --- PERFECTLY ISOLATED MATH ---
+                                # --- PERFECTLY TUNED ATD MATH ---
                                 if aircraft_type.startswith("AT") or "ATR" in aircraft_type or aircraft_type.startswith("DH"):
-                                    perf_speed = 380.0  # Turboprop slow cruise
-                                    perf_sid = 5.0      # Turboprop climb stretch
+                                    perf_speed = 380.0
+                                    perf_sid = 4.0      # Snaps ATR forward 1 min to hit 02:54
                                 else:
-                                    perf_speed = 680.0  # Jets back to stable perfection
-                                    perf_sid = 4.0      # Jets back to stable perfection
+                                    perf_speed = 680.0
+                                    perf_sid = 0.0      # Snaps Jets forward 4 min to hit 02:59
                                    
                                 hours_flown = max(0, (dist_flown / perf_speed) + (perf_sid / 60.0))
                                 atd_time = datetime.now(timezone.utc) - timedelta(hours=hours_flown)
                                 final_dep_str = "ATD: " + atd_time.strftime("%H:%M")
-                                # -------------------------------
+                                # --------------------------------
 
                     strips[icao_id] = {
                         "callsign": norm_cs, "origin": get_icao_airport(f.origin_airport_iata) if f.origin_airport_iata else "UNK",
@@ -325,12 +325,11 @@ async def radar_loop():
                     s = strips[icao_id]
                     s["last_seen"] = now
                    
-                    # --- TELEPORTATION DETECTION PRUNER ---
+                    # Teleportation Filter prevents actual glitches but allows metadata drops to stay
                     if dist > 250 and s.get("last_real_distance", dist) < 100:
                         del strips[icao_id]
                         continue
-                    # --------------------------------------
-                   
+                       
                     s["last_real_distance"] = dist
                     s["distance"] = int(dist)
                     s["speed"] = gs
@@ -360,10 +359,10 @@ async def radar_loop():
                                
                                 if aircraft_type.startswith("AT") or "ATR" in aircraft_type or aircraft_type.startswith("DH"):
                                     perf_speed = 380.0
-                                    perf_sid = 5.0
+                                    perf_sid = 4.0
                                 else:
                                     perf_speed = 680.0
-                                    perf_sid = 4.0
+                                    perf_sid = 0.0
                                    
                                 hours_flown = max(0, (dist_flown / perf_speed) + (perf_sid / 60.0))
                                 atd_time = datetime.now(timezone.utc) - timedelta(hours=hours_flown)
