@@ -302,10 +302,10 @@ async def radar_loop():
                                
                                 if aircraft_type.startswith("AT") or "ATR" in aircraft_type or aircraft_type.startswith("DH"):
                                     perf_speed = 380.0
-                                    perf_sid = 4.0     
+                                    perf_sid = 4.0
                                 else:
                                     perf_speed = 680.0
-                                    perf_sid = 0.0     
+                                    perf_sid = 2.0
                                    
                                 hours_flown = max(0, (dist_flown / perf_speed) + (perf_sid / 60.0))
                                 atd_time = datetime.now(timezone.utc) - timedelta(hours=hours_flown)
@@ -359,7 +359,7 @@ async def radar_loop():
                                     perf_sid = 4.0
                                 else:
                                     perf_speed = 680.0
-                                    perf_sid = 0.0
+                                    perf_sid = 2.0
                                    
                                 hours_flown = max(0, (dist_flown / perf_speed) + (perf_sid / 60.0))
                                 atd_time = datetime.now(timezone.utc) - timedelta(hours=hours_flown)
@@ -488,8 +488,8 @@ html_content = """
                 const block1 = `<div><span class="large-text">${f.callsign}</span><span class="small-text">${f.aircraft} | ${f.speed} kts</span></div>`;
                 const block2 = `<div><span class="large-text">${f.origin} ✈️ ${f.dest}</span><span class="small-text">${f.dep_time} | ${f.distance} km</span></div>`;
                
-                // Visual marker: Clean down arrow replacing the airplane emoji
-                const block3 = `<div style="align-items: center;"><span style="font-size: 1.4em; line-height: 1;">⬇️</span><span class="status-text">${f.status}</span></div>`;
+                // Visual marker: Pure CSS styled bold black downward arrow entity
+                const block3 = `<div style="align-items: center;"><span style="font-size: 1.8em; font-weight: 900; color: #000; line-height: 1;">&#8595;</span><span class="status-text">${f.status}</span></div>`;
                
                 const block4 = `<div style="align-items: center;"><span class="small-text">ETA (UTC)</span><span class="eta-box">${f.eta}</span></div>`;
                 const tdTime = f.touchdown ? f.touchdown : "--:--:--";
