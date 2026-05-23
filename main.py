@@ -197,14 +197,11 @@ async def radar_loop():
                                
                 if not norm_cs or norm_cs == "UNK": continue
 
-                # --- IAF MILITARY LOOPHOLE FIX ---
-                # Added "VU" to the filter to block VIP/IAF aircraft utilizing tail registrations as callsigns.
                 TACTICAL_CALLSIGNS = ("IFC", "RAVEN", "SARANG", "TEJAS", "IAF", "VAYU", "SULUR", "DEF", "K1", "K2", "CHETAK", "VU")
                 MILITARY_AIRCRAFT = ("SU30", "LCA", "AN32", "IL76", "C17", "C130", "HAWK", "D228")
                
                 if norm_cs.startswith(TACTICAL_CALLSIGNS) or aircraft_type.startswith(MILITARY_AIRCRAFT):
                     continue
-                # ---------------------------------
                
                 f_num = getattr(f, 'number', '')
                 f_num = f_num.strip().upper().replace(" ", "") if f_num else ""
@@ -308,7 +305,7 @@ async def radar_loop():
                                     perf_sid = 4.0     
                                 else:
                                     perf_speed = 680.0
-                                    perf_sid = 0.0     
+                                    perf_sid = 2.0     
                                    
                                 hours_flown = max(0, (dist_flown / perf_speed) + (perf_sid / 60.0))
                                 atd_time = datetime.now(timezone.utc) - timedelta(hours=hours_flown)
@@ -325,6 +322,11 @@ async def radar_loop():
                 if icao_id in strips:
                     s = strips[icao_id]
                     s["last_seen"] = now
+                   
+                    if dist > 250 and s.get("last_real_distance", dist) < 100:
+                        del strips[icao_id]
+                        continue
+                       
                     s["last_real_distance"] = dist
                     s["distance"] = int(dist)
                     s["speed"] = gs
@@ -333,8 +335,6 @@ async def radar_loop():
                         del strips[icao_id]
                         continue
                    
-                    # --- RECALIBRATED LANDING GEOFENCE ---
-                    # Shrunk trigger from 3.0km/2000ft down to 1.2km/800ft AGL to hold ETA until the threshold.
                     if s["status"] == "LANDED" and not on_ground and alt > (AIRPORT_ELEV + 800) and gs > 100:
                         s["status"] = "APPROACH"
                         s["touchdown"] = None
@@ -359,7 +359,7 @@ async def radar_loop():
                                     perf_sid = 4.0
                                 else:
                                     perf_speed = 680.0
-                                    perf_sid = 0.0
+                                    perf_sid = 2.0
                                    
                                 hours_flown = max(0, (dist_flown / perf_speed) + (perf_sid / 60.0))
                                 atd_time = datetime.now(timezone.utc) - timedelta(hours=hours_flown)
@@ -369,14 +369,12 @@ async def radar_loop():
                     if s["status"] == "EN ROUTE" and dist < 100: s["status"] = "APPROACH"
                    
                     if s["status"] == "APPROACH":
-                        # Geofence reduced to 1.2km and 800ft to stop premature ATA timestamps
                         if on_ground or (dist < 1.2 and alt <= (AIRPORT_ELEV + 800)):
                             if s["status"] != "LANDED":
                                 s["status"] = "LANDED"
                                 td_time = datetime.now(timezone.utc)
                                 s["touchdown"] = td_time.strftime("%H:%M:%S")
                                 s["sort_time"] = td_time.timestamp()
-                    # -------------------------------------
 
         except Exception as e: print(f"Radar polling error: {e}")
 
@@ -385,7 +383,7 @@ async def radar_loop():
             s = strips[k]
             time_lost = now - s["last_seen"]
            
-            if s["status"] == "APPROACH" and s.get("last_real_distance", 999) < 45 and time_lost > 30:
+            if s["status"] == "APPROACH" and s.get("last_real_distance", 999) < 85 and time_lost > 30:
                 speed_km_sec = max(s["speed"], 140) * 0.000514
                 ghost_dist = s["last_real_distance"] - (speed_km_sec * time_lost)
                
@@ -402,7 +400,7 @@ async def radar_loop():
                 else:
                     s["distance"] = int(max(1, ghost_dist))
                
-            elif time_lost > 900: del strips[k]
+            elif time_lost > 1800: del strips[k]
            
         await asyncio.sleep(8)
 
@@ -439,7 +437,7 @@ html_content = """
         .strip.landed { background-color: #c8e6c9; color: #555; }
         .small-text { font-size: 0.75em; color: #444; }
         .large-text { font-size: 1.3em; }
-        .status-text { text-align: center; font-size: 1.1em; }
+        .status-text { text-align: center; font-size: 1.1em; margin-top: 2px; }
         .eta-box { background: #fff; border: 1px solid #000; padding: 2px 12px; margin-top: 4px; border-radius: 6px; text-align: center; display: inline-block; font-size: 1.6em; box-shadow: inset 1px 1px 4px rgba(0,0,0,0.15);}
         .landed .eta-box { background: transparent; border: none; box-shadow: none; text-decoration: line-through;}
     </style>
@@ -489,7 +487,10 @@ html_content = """
 
                 const block1 = `<div><span class="large-text">${f.callsign}</span><span class="small-text">${f.aircraft} | ${f.speed} kts</span></div>`;
                 const block2 = `<div><span class="large-text">${f.origin} ✈️ ${f.dest}</span><span class="small-text">${f.dep_time} | ${f.distance} km</span></div>`;
-                const block3 = `<div><span class="status-text">${f.status}</span></div>`;
+               
+                // Visual marker specifically for the arrival status block
+                const block3 = `<div style="align-items: center;"><span style="font-size: 1.4em;">🛬</span><span class="status-text">${f.status}</span></div>`;
+               
                 const block4 = `<div style="align-items: center;"><span class="small-text">ETA (UTC)</span><span class="eta-box">${f.eta}</span></div>`;
                 const tdTime = f.touchdown ? f.touchdown : "--:--:--";
                 const tdColor = f.touchdown ? '#d32f2f' : 'inherit';
