@@ -302,10 +302,10 @@ async def radar_loop():
                                 
                                 if aircraft_type.startswith("AT") or "ATR" in aircraft_type or aircraft_type.startswith("DH"):
                                     perf_speed = 380.0
-                                    perf_sid = 4.0
+                                    perf_sid = 4.0      
                                 else:
                                     perf_speed = 680.0
-                                    perf_sid = 2.0
+                                    perf_sid = 2.0      
                                     
                                 hours_flown = max(0, (dist_flown / perf_speed) + (perf_sid / 60.0))
                                 atd_time = datetime.now(timezone.utc) - timedelta(hours=hours_flown)
@@ -430,9 +430,16 @@ html_content = """
         .rwy-header { color: #ffeb3b; font-weight: bold; font-size: 1.2em;}
         .utc-clock { position: absolute; top: 0; right: 0; background-color: #000; color: #00ff00; padding: 8px 15px; border: 2px solid #555; font-size: 1.8em; font-weight: bold; box-shadow: 2px 2px 5px rgba(0,0,0,0.5);}
         .board { display: flex; flex-direction: column; gap: 8px; max-width: 1000px; margin: 0 auto; }
-        .strip { display: grid; grid-template-columns: 1.5fr 1.5fr 1fr 1fr 1fr; background-color: #ffe0b2; border: 2px solid #000; box-shadow: 3px 3px 5px rgba(0,0,0,0.4); height: 65px; font-weight: bold; font-size: 1.1em; }
-        .strip > div { border-right: 2px solid #000; padding: 5px 10px; display: flex; flex-direction: column; justify-content: center; }
-        .strip > div:last-child { border-right: none; }
+        
+        /* Flexbox rewrite for perfect legacy Firefox support */
+        .strip { display: flex; width: 100%; box-sizing: border-box; background-color: #ffe0b2; border: 2px solid #000; box-shadow: 3px 3px 5px rgba(0,0,0,0.4); height: 65px; font-weight: bold; font-size: 1.1em; }
+        .strip > div { box-sizing: border-box; border-right: 2px solid #000; padding: 5px 10px; display: flex; flex-direction: column; justify-content: center; overflow: hidden; }
+        .strip > div:nth-child(1) { flex: 3; }
+        .strip > div:nth-child(2) { flex: 3; }
+        .strip > div:nth-child(3) { flex: 2; }
+        .strip > div:nth-child(4) { flex: 2; }
+        .strip > div:nth-child(5) { flex: 2; border-right: none; }
+        
         .strip.approach { background-color: #bbdefb; }
         .strip.landed { background-color: #c8e6c9; color: #555; }
         .small-text { font-size: 0.75em; color: #444; }
