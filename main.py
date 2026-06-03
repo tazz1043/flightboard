@@ -369,7 +369,6 @@ async def radar_loop():
                     if s["status"] == "EN ROUTE" and dist < 100: s["status"] = "APPROACH"
                    
                     if s["status"] == "APPROACH":
-                        # Geofence locked: "on_ground" signal is ignored unless aircraft is within 3.0km
                         if (on_ground and dist < 3.0) or (dist < 1.2 and alt <= (AIRPORT_ELEV + 800)):
                             if s["status"] != "LANDED":
                                 s["status"] = "LANDED"
@@ -385,18 +384,16 @@ async def radar_loop():
             time_lost = now - s["last_seen"]
            
             if s["status"] == "APPROACH" and s.get("last_real_distance", 999) < 85 and time_lost > 30:
-                # --- Decelerating Ghost Protocol ---
                 last_dist = s.get("last_real_distance", 999)
                 if last_dist < 25:
-                    ghost_kts = 145.0  # Force braking for short final
+                    ghost_kts = 145.0 
                 elif last_dist < 50:
-                    ghost_kts = 210.0  # Approach phase deceleration
+                    ghost_kts = 210.0 
                 else:
                     ghost_kts = s["speed"]
                    
                 speed_km_sec = max(ghost_kts, 130) * 0.000514
                 ghost_dist = last_dist - (speed_km_sec * time_lost)
-                # -----------------------------------
                
                 if ghost_dist <= 0 or (s["distance"] < 6 and time_lost > 75):
                     if s["status"] != "LANDED":
@@ -442,21 +439,55 @@ html_content = """
         .utc-clock { position: absolute; top: 0; right: 0; background-color: #000; color: #00ff00; padding: 8px 15px; border: 2px solid #555; font-size: 1.8em; font-weight: bold; box-shadow: 2px 2px 5px rgba(0,0,0,0.5);}
         .board { display: flex; flex-direction: column; gap: 8px; max-width: 1000px; margin: 0 auto; }
        
-        /* Flexbox rewrite for perfect legacy Firefox support */
-        .strip { display: flex; width: 100%; box-sizing: border-box; background-color: #ffe0b2; border: 2px solid #000; box-shadow: 3px 3px 5px rgba(0,0,0,0.4); height: 65px; font-weight: bold; font-size: 1.1em; }
-        .strip > div { box-sizing: border-box; border-right: 2px solid #000; padding: 5px 10px; display: flex; flex-direction: column; justify-content: center; overflow: hidden; }
+        /* 3D Flexbox Strip UI */
+        .strip {
+            display: flex; width: 100%; box-sizing: border-box;
+            background: linear-gradient(to bottom, #ffecb3 0%, #ffb74d 100%);
+            border: 1px solid #444;
+            border-bottom: 4px solid #333;
+            border-radius: 6px;
+            box-shadow: 0 6px 10px rgba(0,0,0,0.5), inset 0 2px 2px rgba(255,255,255,0.8);
+            height: 65px; font-weight: bold; font-size: 1.1em;
+            margin-bottom: 4px;
+            transition: all 0.2s ease;
+        }
+        .strip > div {
+            box-sizing: border-box;
+            border-right: 1px solid rgba(0,0,0,0.3);
+            box-shadow: inset -1px 0 0 rgba(255,255,255,0.4);
+            padding: 5px 10px; display: flex; flex-direction: column; justify-content: center; overflow: hidden;
+        }
         .strip > div:nth-child(1) { flex: 3; }
         .strip > div:nth-child(2) { flex: 3; }
         .strip > div:nth-child(3) { flex: 2; }
         .strip > div:nth-child(4) { flex: 2; }
-        .strip > div:nth-child(5) { flex: 2; border-right: none; }
+        .strip > div:nth-child(5) { flex: 2; border-right: none; box-shadow: none; }
        
-        .strip.approach { background-color: #bbdefb; }
-        .strip.landed { background-color: #c8e6c9; color: #555; }
+        /* 3D States */
+        .strip.approach {
+            background: linear-gradient(to bottom, #bbdefb 0%, #42a5f5 100%);
+        }
+        .strip.landed {
+            background: linear-gradient(to bottom, #c8e6c9 0%, #66bb6a 100%);
+            color: #333;
+            border-bottom: 1px solid #444;
+            transform: translateY(3px);
+            box-shadow: 0 2px 4px rgba(0,0,0,0.4), inset 0 1px 1px rgba(255,255,255,0.5);
+        }
+       
         .small-text { font-size: 0.75em; color: #444; }
         .large-text { font-size: 1.3em; }
         .status-text { text-align: center; font-size: 1.1em; margin-top: 2px; }
-        .eta-box { background: #fff; border: 1px solid #000; padding: 2px 12px; margin-top: 4px; border-radius: 6px; text-align: center; display: inline-block; font-size: 1.6em; box-shadow: inset 1px 1px 4px rgba(0,0,0,0.15);}
+       
+        /* Inset Screen Look for ETA */
+        .eta-box {
+            background: #fafafa;
+            border: 1px solid #777;
+            border-top: 2px solid #222;
+            border-left: 2px solid #222;
+            padding: 2px 12px; margin-top: 4px; border-radius: 4px; text-align: center; display: inline-block; font-size: 1.6em;
+            box-shadow: inset 2px 2px 5px rgba(0,0,0,0.2), 0 1px 0 rgba(255,255,255,0.6);
+        }
         .landed .eta-box { background: transparent; border: none; box-shadow: none; text-decoration: line-through;}
     </style>
 </head>
@@ -507,7 +538,7 @@ html_content = """
                 const block2 = `<div><span class="large-text">${f.origin} ✈️ ${f.dest}</span><span class="small-text">${f.dep_time} | ${f.distance} km</span></div>`;
                
                 const block3 = `<div style="align-items: center;">
-                                    <svg width="22" height="22" viewBox="0 0 24 24" fill="#000" style="margin-bottom: 2px;">
+                                    <svg width="22" height="22" viewBox="0 0 24 24" fill="#000" style="margin-bottom: 2px; filter: drop-shadow(0px 1px 1px rgba(255,255,255,0.4));">
                                         <path d="M9 2v12H4l8 8 8-8h-5V2H9z"/>
                                     </svg>
                                     <span class="status-text">${f.status}</span>
