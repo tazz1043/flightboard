@@ -479,6 +479,20 @@ html_content = """
         .large-text { font-size: 1.3em; }
         .status-text { text-align: center; font-size: 1.1em; margin-top: 2px; }
         
+        /* Highlighted Distance Badge */
+        .dist-highlight {
+            font-size: 1.4em;
+            font-weight: 900;
+            color: #000;
+            background-color: rgba(255, 255, 255, 0.7);
+            padding: 1px 6px;
+            border-radius: 4px;
+            border: 1px solid rgba(0,0,0,0.3);
+            box-shadow: 1px 1px 3px rgba(0,0,0,0.3);
+            margin-left: 5px;
+            display: inline-block;
+        }
+
         /* Inset Screen Look for ETA */
         .eta-box { 
             background: #fafafa; 
@@ -541,7 +555,7 @@ html_content = """
                 div.className = stripClass;
 
                 const block1 = `<div><span class="large-text">${f.callsign}</span><span class="small-text">${f.aircraft} | ${f.speed} kts</span></div>`;
-                const block2 = `<div><span class="large-text">${f.origin} ✈️ ${f.dest}</span><span class="small-text">${f.dep_time} | ${f.distance} km</span></div>`;
+                const block2 = `<div><span class="large-text">${f.origin} ✈️ ${f.dest}</span><span class="small-text">${f.dep_time} | <span class="dist-highlight">${f.distance} km</span></span></div>`;
                 
                 const block3 = `<div style="align-items: center;">
                                     <svg width="22" height="22" viewBox="0 0 24 24" fill="#000" style="margin-bottom: 2px; filter: drop-shadow(0px 1px 1px rgba(255,255,255,0.4));">
