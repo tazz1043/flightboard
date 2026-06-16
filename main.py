@@ -553,9 +553,12 @@ html_content = """
                 if (f.status === "APPROACH") stripClass += " approach";
                 if (f.status === "LANDED") stripClass += " landed";
                 div.className = stripClass;
+                
+                // Convert backend kilometers to Nautical Miles for the glass display
+                const distNM = Math.round(f.distance * 0.539957);
 
                 const block1 = `<div><span class="large-text">${f.callsign}</span><span class="small-text">${f.aircraft} | ${f.speed} kts</span></div>`;
-                const block2 = `<div><span class="large-text">${f.origin} ✈️ ${f.dest}</span><span class="small-text">${f.dep_time} | <span class="dist-highlight">${f.distance} km</span></span></div>`;
+                const block2 = `<div><span class="large-text">${f.origin} ✈️ ${f.dest}</span><span class="small-text">${f.dep_time} | <span class="dist-highlight">${distNM} NM</span></span></div>`;
                 
                 const block3 = `<div style="align-items: center;">
                                     <svg width="22" height="22" viewBox="0 0 24 24" fill="#000" style="margin-bottom: 2px; filter: drop-shadow(0px 1px 1px rgba(255,255,255,0.4));">
