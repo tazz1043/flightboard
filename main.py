@@ -252,32 +252,35 @@ async def radar_loop():
                     bearing = calculate_bearing(f.latitude, f.longitude, VOCB_LAT, VOCB_LON)
                     rwy_heading = 233 if rwy_in_use == "23" else 53
                     angle_diff = abs((bearing - rwy_heading + 180) % 360 - 180)
-                    alt_to_lose = max(0, alt - AIRPORT_ELEV)
                    
-                    decel_buffer_mins = 0.5 * (1 - (dist / 55.56)) if dist <= 55.56 else 0
-
-                    if dist <= 55.56:
-                        if angle_diff < 60:
-                            mins_remaining = 8.0 * (dist / 46.3) + decel_buffer_mins
-                        elif angle_diff < 120:
-                            mins_remaining = 11.0 * (dist / 46.3) + decel_buffer_mins
-                        else:
-                            speed_km_per_min = max(gs * 1.852, 220) / 60.0
-                            mins_to_ccb = dist / speed_km_per_min
-                            proc_time = 9.0 if rwy_in_use == "23" else 13.0
-                            mins_remaining = mins_to_ccb + proc_time + decel_buffer_mins
-                        hours_remaining = mins_remaining / 60.0
+                    dist_nm = dist / 1.852
+                    gs_knots = max(gs, 150)
+                    is_turboprop = aircraft_type.startswith("AT") or "ATR" in aircraft_type or aircraft_type.startswith("DH")
+                   
+                    # 336 Radial Arc Penalty (Captures aircraft arriving >45 degrees offset from Runway 23)
+                    arc_penalty = 0
+                    if angle_diff > 45:
+                        arc_penalty = 4.0 if is_turboprop else 3.0
                        
+                    if is_turboprop:
+                        # Empirical Sector Profile: Turboprops (ATR/Q400)
+                        if dist_nm <= 50:
+                            mins_remaining = (dist_nm / 50.0) * 18.0
+                        elif dist_nm <= 100:
+                            mins_remaining = 18.0 + ((dist_nm - 50.0) / 50.0) * 12.0
+                        else:
+                            mins_remaining = 30.0 + ((dist_nm - 100.0) / (gs_knots / 60.0))
                     else:
-                        lateral_miles = dist + 40 if angle_diff > 90 else dist + 15
-                        required_descent_dist_km = (alt_to_lose / 1000) * 3 * 1.852
-                        true_track_distance = max(lateral_miles, required_descent_dist_km)
-                        if alt < 5000: phase_speed = 260
-                        elif alt < 10000: phase_speed = 450
-                        elif alt < 20000: phase_speed = 550
-                        else: phase_speed = 750
-                        blended_speed_kmh = (gs * 1.852 * 0.4) + (phase_speed * 0.6)
-                        hours_remaining = true_track_distance / max(blended_speed_kmh, 250)
+                        # Empirical Sector Profile: Jets (A320/A321/B737)
+                        if dist_nm <= 50:
+                            mins_remaining = (dist_nm / 50.0) * 13.0
+                        elif dist_nm <= 100:
+                            mins_remaining = 13.0 + ((dist_nm - 50.0) / 50.0) * 7.0
+                        else:
+                            mins_remaining = 20.0 + ((dist_nm - 100.0) / (gs_knots / 60.0))
+                           
+                    mins_remaining += arc_penalty
+                    hours_remaining = mins_remaining / 60.0
                    
                     eta_time = datetime.now(timezone.utc) + timedelta(hours=hours_remaining)
                     eta_str = eta_time.strftime("%H:%M")
@@ -518,7 +521,6 @@ html_content = """
     <script>
         let usePolling = false;
        
-        // Use exact server time injected by Python, bypassing local PC clocks
         const initialServerTime = {{SERVER_TIME}};
         const initialLocalTime = Date.now();
 
@@ -554,7 +556,6 @@ html_content = """
                 if (f.status === "LANDED") stripClass += " landed";
                 div.className = stripClass;
                
-                // Convert backend kilometers to Nautical Miles for the glass display
                 const distNM = Math.round(f.distance * 0.539957);
 
                 const block1 = `<div><span class="large-text">${f.callsign}</span><span class="small-text">${f.aircraft} | ${f.speed} kts</span></div>`;
@@ -609,7 +610,6 @@ html_content = """
 
 @app.get("/")
 async def get_webpage():
-    # Inject pure server time directly into the HTML payload
     server_time_ms = int(time.time() * 1000)
     rendered_html = html_content.replace("{{SERVER_TIME}}", str(server_time_ms))
     return HTMLResponse(rendered_html)
