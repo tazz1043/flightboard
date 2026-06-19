@@ -257,13 +257,11 @@ async def radar_loop():
                     gs_knots = max(gs, 150)
                     is_turboprop = aircraft_type.startswith("AT") or "ATR" in aircraft_type or aircraft_type.startswith("DH")
                    
-                    # 336 Radial Arc Penalty (Captures aircraft arriving >45 degrees offset from Runway 23)
                     arc_penalty = 0
                     if angle_diff > 45:
                         arc_penalty = 4.0 if is_turboprop else 3.0
                        
                     if is_turboprop:
-                        # Empirical Sector Profile: Turboprops (ATR/Q400)
                         if dist_nm <= 50:
                             mins_remaining = (dist_nm / 50.0) * 18.0
                         elif dist_nm <= 100:
@@ -271,7 +269,6 @@ async def radar_loop():
                         else:
                             mins_remaining = 30.0 + ((dist_nm - 100.0) / (gs_knots / 60.0))
                     else:
-                        # Empirical Sector Profile: Jets (A320/A321/B737)
                         if dist_nm <= 50:
                             mins_remaining = (dist_nm / 50.0) * 13.0
                         elif dist_nm <= 100:
@@ -387,6 +384,8 @@ async def radar_loop():
             time_lost = now - s["last_seen"]
            
             if s["status"] == "APPROACH" and s.get("last_real_distance", 999) < 85 and time_lost > 30:
+               
+                # Failsafe: Decelerating Ghost Protocol
                 last_dist = s.get("last_real_distance", 999)
                 if last_dist < 25:
                     ghost_kts = 145.0 
