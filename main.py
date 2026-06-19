@@ -197,8 +197,9 @@ async def radar_loop():
                                
                 if not norm_cs or norm_cs == "UNK": continue
 
-                TACTICAL_CALLSIGNS = ("IFC", "RAVEN", "SARANG", "TEJAS", "IAF", "VAYU", "SULUR", "DEF", "K1", "K2", "CHETAK", "VU")
-                MILITARY_AIRCRAFT = ("SU30", "LCA", "AN32", "IL76", "C17", "C130", "HAWK", "D228")
+                # Added ROBIN and IL78 to blackout filters
+                TACTICAL_CALLSIGNS = ("IFC", "RAVEN", "SARANG", "TEJAS", "IAF", "VAYU", "SULUR", "DEF", "K1", "K2", "CHETAK", "VU", "ROBIN")
+                MILITARY_AIRCRAFT = ("SU30", "LCA", "AN32", "IL76", "IL78", "C17", "C130", "HAWK", "D228")
                
                 if norm_cs.startswith(TACTICAL_CALLSIGNS) or aircraft_type.startswith(MILITARY_AIRCRAFT):
                     continue
@@ -316,14 +317,22 @@ async def radar_loop():
                         "dest": "VOCB", "aircraft": f.aircraft_code if f.aircraft_code else "UNK", "speed": gs,
                         "status": init_status, "dep_time": final_dep_str, "eta": eta_str, "sort_time": eta_unix,
                         "touchdown": None, "last_seen": now, "distance": int(dist), "last_real_distance": dist,
+                        "min_distance": dist,  # NEW: Tracks absolute closest approach
                         "last_dep_check": now, "initiated_missed_approach": historical_missed_approach
                     }
 
                 if icao_id in strips:
                     s = strips[icao_id]
                     s["last_seen"] = now
+                    s["min_distance"] = min(s.get("min_distance", dist), dist)
                    
-                    if dist > 250 and s.get("last_real_distance", dist) < 100:
+                    # OUTBOUND PURGE 1: Delete any tracked flight that moves away past 100 NM (185 km)
+                    if dist > 185 and s["min_distance"] < 100:
+                        del strips[icao_id]
+                        continue
+                       
+                    # OUTBOUND PURGE 2: Delete unannounced non-CJB traffic wandering past 60 NM (110 km)
+                    if dist > 110 and dest_iata != TARGET_IATA and norm_cs not in NORMALIZED_MANUAL_LIST:
                         del strips[icao_id]
                         continue
                        
