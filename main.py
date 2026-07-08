@@ -25,6 +25,7 @@ DYNAMIC_WATCHLIST = {}
 LAST_SCHEDULE_FETCH = 0
 NORMALIZED_MANUAL_LIST = set()
 strips = {}
+CIRCUIT_FLIGHTS_IGNORE = {}  # NEW: Blacklist for circuit/training flights
 
 ORIGIN_COORDS = {
     "DEL": (28.5562, 77.1000), "MAA": (12.9941, 80.1709),
@@ -160,7 +161,7 @@ def get_deep_atd(flight_id):
 
 # --- BACKGROUND RADAR ENGINE ---
 async def radar_loop():
-    global strips
+    global strips, CIRCUIT_FLIGHTS_IGNORE
     while True:
         await asyncio.to_thread(update_dynamic_watchlist)
         rwy_in_use = await asyncio.to_thread(get_active_runway)
@@ -173,6 +174,13 @@ async def radar_loop():
                 if not f.latitude or not f.longitude: continue
                
                 icao_id = f.id
+               
+                # Verify if aircraft is in the temporary 1-hour blacklist for circuit flying
+                if icao_id in CIRCUIT_FLIGHTS_IGNORE:
+                    if now - CIRCUIT_FLIGHTS_IGNORE[icao_id] < 3600:
+                        continue
+                    else:
+                        del CIRCUIT_FLIGHTS_IGNORE[icao_id]
                
                 dist = get_distance(f.latitude, f.longitude, VOCB_LAT, VOCB_LON)
                 alt = f.altitude
@@ -197,7 +205,6 @@ async def radar_loop():
                                
                 if not norm_cs or norm_cs == "UNK": continue
 
-                # Added ROBIN and IL78 to blackout filters
                 TACTICAL_CALLSIGNS = ("IFC", "RAVEN", "SARANG", "TEJAS", "IAF", "VAYU", "SULUR", "DEF", "K1", "K2", "CHETAK", "VU", "ROBIN")
                 MILITARY_AIRCRAFT = ("SU30", "LCA", "AN32", "IL76", "IL78", "C17", "C130", "HAWK", "D228")
                
@@ -317,7 +324,7 @@ async def radar_loop():
                         "dest": "VOCB", "aircraft": f.aircraft_code if f.aircraft_code else "UNK", "speed": gs,
                         "status": init_status, "dep_time": final_dep_str, "eta": eta_str, "sort_time": eta_unix,
                         "touchdown": None, "last_seen": now, "distance": int(dist), "last_real_distance": dist,
-                        "min_distance": dist,  # NEW: Tracks absolute closest approach
+                        "min_distance": dist,
                         "last_dep_check": now, "initiated_missed_approach": historical_missed_approach
                     }
 
@@ -326,15 +333,23 @@ async def radar_loop():
                     s["last_seen"] = now
                     s["min_distance"] = min(s.get("min_distance", dist), dist)
                    
-                    # OUTBOUND PURGE 1: Delete any tracked flight that moves away past 100 NM (185 km)
+                    # OUTBOUND PURGE 1: Delete outbound long-haul wandering traffic
                     if dist > 185 and s["min_distance"] < 100:
                         del strips[icao_id]
                         continue
                        
-                    # OUTBOUND PURGE 2: Delete unannounced non-CJB traffic wandering past 60 NM (110 km)
+                    # OUTBOUND PURGE 2: Delete unannounced non-CJB traffic passing by
                     if dist > 110 and dest_iata != TARGET_IATA and norm_cs not in NORMALIZED_MANUAL_LIST:
                         del strips[icao_id]
                         continue
+                       
+                    # OUTBOUND PURGE 3: Discard circuit/training flights entering 25 NM (46.3km) & exiting past 27 NM (50km)
+                    if dist > 50.0 and s["min_distance"] < 46.3:
+                        # Safeguard: Do not blacklist scheduled commercial flights doing a legitimate missed approach
+                        if not (is_auto_expected or norm_cs in NORMALIZED_MANUAL_LIST):
+                            CIRCUIT_FLIGHTS_IGNORE[icao_id] = now
+                            del strips[icao_id]
+                            continue
                        
                     s["last_real_distance"] = dist
                     s["distance"] = int(dist)
@@ -394,7 +409,6 @@ async def radar_loop():
            
             if s["status"] == "APPROACH" and s.get("last_real_distance", 999) < 85 and time_lost > 30:
                
-                # Failsafe: Decelerating Ghost Protocol
                 last_dist = s.get("last_real_distance", 999)
                 if last_dist < 25:
                     ghost_kts = 145.0 
@@ -450,7 +464,6 @@ html_content = """
         .utc-clock { position: absolute; top: 0; right: 0; background-color: #000; color: #00ff00; padding: 8px 15px; border: 2px solid #555; font-size: 1.8em; font-weight: bold; box-shadow: 2px 2px 5px rgba(0,0,0,0.5);}
         .board { display: flex; flex-direction: column; gap: 8px; max-width: 1000px; margin: 0 auto; }
        
-        /* 3D Flexbox Strip UI */
         .strip {
             display: flex; width: 100%; box-sizing: border-box;
             background: linear-gradient(to bottom, #ffecb3 0%, #ffb74d 100%);
@@ -474,7 +487,6 @@ html_content = """
         .strip > div:nth-child(4) { flex: 2; }
         .strip > div:nth-child(5) { flex: 2; border-right: none; box-shadow: none; }
        
-        /* 3D States */
         .strip.approach {
             background: linear-gradient(to bottom, #bbdefb 0%, #42a5f5 100%);
         }
@@ -490,7 +502,6 @@ html_content = """
         .large-text { font-size: 1.3em; }
         .status-text { text-align: center; font-size: 1.1em; margin-top: 2px; }
        
-        /* Highlighted Distance Badge */
         .dist-highlight {
             font-size: 1.4em;
             font-weight: 900;
@@ -504,7 +515,6 @@ html_content = """
             display: inline-block;
         }
 
-        /* Inset Screen Look for ETA */
         .eta-box {
             background: #fafafa;
             border: 1px solid #777;
