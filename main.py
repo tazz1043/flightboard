@@ -25,7 +25,7 @@ DYNAMIC_WATCHLIST = {}
 LAST_SCHEDULE_FETCH = 0
 NORMALIZED_MANUAL_LIST = set()
 strips = {}
-CIRCUIT_FLIGHTS_IGNORE = {}  # NEW: Blacklist for circuit/training flights
+CIRCUIT_FLIGHTS_IGNORE = {}
 
 ORIGIN_COORDS = {
     "DEL": (28.5562, 77.1000), "MAA": (12.9941, 80.1709),
@@ -175,7 +175,6 @@ async def radar_loop():
                
                 icao_id = f.id
                
-                # Verify if aircraft is in the temporary 1-hour blacklist for circuit flying
                 if icao_id in CIRCUIT_FLIGHTS_IGNORE:
                     if now - CIRCUIT_FLIGHTS_IGNORE[icao_id] < 3600:
                         continue
@@ -223,18 +222,22 @@ async def radar_loop():
 
                 is_already_tracked = (icao_id in strips) or (duplicate_id is not None)
                 is_auto_expected = (norm_cs in DYNAMIC_WATCHLIST) or (f_num in DYNAMIC_WATCHLIST)
-               
-                if not is_already_tracked:
-                    if dest_iata and dest_iata not in [TARGET_IATA, "N/A", ""]:
-                        continue
-               
-                if not is_already_tracked and dist < 60 and v_speed > 250 and dest_iata != TARGET_IATA:
-                    continue
-               
                 is_cjb_bound = dest_iata == TARGET_IATA
                 is_manual_expected = norm_cs in NORMALIZED_MANUAL_LIST
-                is_unannounced_arrival = (dest_iata in ["", "N/A"]) and (dist < 75) and (alt < 15000) and (v_speed < -150)
-
+               
+                # --- SENSOR FUSION: Vector Intercept Geofence (RESTORED) ---
+                bearing_to_cjb = calculate_bearing(f.latitude, f.longitude, VOCB_LAT, VOCB_LON)
+                trk = getattr(f, 'heading', 0)
+                trk_diff = abs((trk - bearing_to_cjb + 180) % 360 - 180)
+               
+                is_unannounced_arrival = (
+                    (dest_iata in ["", "N/A"]) and
+                    (dist < 110) and
+                    (alt < 15000) and
+                    (trk_diff < 45 or v_speed < -150)
+                )
+                # -----------------------------------------------------------
+               
                 is_qualified = (
                     is_already_tracked or is_cjb_bound or is_auto_expected or
                     is_manual_expected or is_unannounced_arrival
@@ -257,10 +260,7 @@ async def radar_loop():
                 eta_unix = float('inf')
                
                 if gs > 50 and not on_ground:
-                    bearing = calculate_bearing(f.latitude, f.longitude, VOCB_LAT, VOCB_LON)
-                    rwy_heading = 233 if rwy_in_use == "23" else 53
-                    angle_diff = abs((bearing - rwy_heading + 180) % 360 - 180)
-                   
+                    angle_diff = abs((bearing_to_cjb - (233 if rwy_in_use == "23" else 53) + 180) % 360 - 180)
                     dist_nm = dist / 1.852
                     gs_knots = max(gs, 150)
                     is_turboprop = aircraft_type.startswith("AT") or "ATR" in aircraft_type or aircraft_type.startswith("DH")
@@ -325,6 +325,7 @@ async def radar_loop():
                         "status": init_status, "dep_time": final_dep_str, "eta": eta_str, "sort_time": eta_unix,
                         "touchdown": None, "last_seen": now, "distance": int(dist), "last_real_distance": dist,
                         "min_distance": dist,
+                        "is_scheduled": is_auto_expected, # NEW: Protects scheduled flights from aggressive purges
                         "last_dep_check": now, "initiated_missed_approach": historical_missed_approach
                     }
 
@@ -338,15 +339,14 @@ async def radar_loop():
                         del strips[icao_id]
                         continue
                        
-                    # OUTBOUND PURGE 2: Delete unannounced non-CJB traffic passing by
-                    if dist > 110 and dest_iata != TARGET_IATA and norm_cs not in NORMALIZED_MANUAL_LIST:
+                    # OUTBOUND PURGE 2: Delete unannounced non-CJB traffic passing by (FIXED to protect scheduled flights)
+                    if dist > 110 and dest_iata != TARGET_IATA and not s.get("is_scheduled", False) and norm_cs not in NORMALIZED_MANUAL_LIST:
                         del strips[icao_id]
                         continue
                        
                     # OUTBOUND PURGE 3: Discard circuit/training flights entering 25 NM (46.3km) & exiting past 27 NM (50km)
                     if dist > 50.0 and s["min_distance"] < 46.3:
-                        # Safeguard: Do not blacklist scheduled commercial flights doing a legitimate missed approach
-                        if not (is_auto_expected or norm_cs in NORMALIZED_MANUAL_LIST):
+                        if not (s.get("is_scheduled", False) or norm_cs in NORMALIZED_MANUAL_LIST):
                             CIRCUIT_FLIGHTS_IGNORE[icao_id] = now
                             del strips[icao_id]
                             continue
@@ -408,7 +408,6 @@ async def radar_loop():
             time_lost = now - s["last_seen"]
            
             if s["status"] == "APPROACH" and s.get("last_real_distance", 999) < 85 and time_lost > 30:
-               
                 last_dist = s.get("last_real_distance", 999)
                 if last_dist < 25:
                     ghost_kts = 145.0 
