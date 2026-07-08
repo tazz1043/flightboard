@@ -16,7 +16,7 @@ VOCB_LAT = 11.0300
 VOCB_LON = 77.0434
 AIRPORT_ELEV = 1322 
 TARGET_IATA = "CJB"
-REGION_BOUNDS = "40.0,-5.0,50.0,110.0"
+REGION_BOUNDS = "0.0,65.0,25.0,90.0" # Expanded for larger airborne coverage
 EXPECTED_CALLSIGNS = []
 
 ACTIVE_RUNWAY = "23"
@@ -167,6 +167,7 @@ async def radar_loop():
         rwy_in_use = await asyncio.to_thread(get_active_runway)
        
         try:
+            # Expanded scan to catch departures from source
             flights = await asyncio.to_thread(fr_api.get_flights, bounds=REGION_BOUNDS)
             now = time.time()
            
@@ -222,25 +223,22 @@ async def radar_loop():
 
                 is_already_tracked = (icao_id in strips) or (duplicate_id is not None)
                 is_auto_expected = (norm_cs in DYNAMIC_WATCHLIST) or (f_num in DYNAMIC_WATCHLIST)
-                is_cjb_bound = dest_iata == TARGET_IATA
-                is_manual_expected = norm_cs in NORMALIZED_MANUAL_LIST
+                is_cjb_bound = dest_iata in [TARGET_IATA, "VOCB"]
                
-                # --- SENSOR FUSION: Vector Intercept Geofence (RESTORED) ---
+                # --- NEW: Enhanced Vector Intercept ---
                 bearing_to_cjb = calculate_bearing(f.latitude, f.longitude, VOCB_LAT, VOCB_LON)
                 trk = getattr(f, 'heading', 0)
                 trk_diff = abs((trk - bearing_to_cjb + 180) % 360 - 180)
                
                 is_unannounced_arrival = (
-                    (dest_iata in ["", "N/A"]) and
-                    (dist < 110) and
-                    (alt < 15000) and
-                    (trk_diff < 45 or v_speed < -150)
+                    (dist < 500) and # Capture from far out
+                    (trk_diff < 15) # Must be heading toward CJB
                 )
-                # -----------------------------------------------------------
+                # --------------------------------------
                
                 is_qualified = (
                     is_already_tracked or is_cjb_bound or is_auto_expected or
-                    is_manual_expected or is_unannounced_arrival
+                    norm_cs in NORMALIZED_MANUAL_LIST or is_unannounced_arrival
                 )
                
                 if not is_qualified:
@@ -325,7 +323,7 @@ async def radar_loop():
                         "status": init_status, "dep_time": final_dep_str, "eta": eta_str, "sort_time": eta_unix,
                         "touchdown": None, "last_seen": now, "distance": int(dist), "last_real_distance": dist,
                         "min_distance": dist,
-                        "is_scheduled": is_auto_expected, # NEW: Protects scheduled flights from aggressive purges
+                        "is_scheduled": is_auto_expected or is_cjb_bound,
                         "last_dep_check": now, "initiated_missed_approach": historical_missed_approach
                     }
 
@@ -334,19 +332,20 @@ async def radar_loop():
                     s["last_seen"] = now
                     s["min_distance"] = min(s.get("min_distance", dist), dist)
                    
-                    # OUTBOUND PURGE 1: Delete outbound long-haul wandering traffic
-                    if dist > 185 and s["min_distance"] < 100:
+                    # OUTBOUND PURGE: Delete far-flung traffic
+                    if dist > 300 and s["min_distance"] < 100:
                         del strips[icao_id]
                         continue
                        
-                    # OUTBOUND PURGE 2: Delete unannounced non-CJB traffic passing by (FIXED to protect scheduled flights)
-                    if dist > 110 and dest_iata != TARGET_IATA and not s.get("is_scheduled", False) and norm_cs not in NORMALIZED_MANUAL_LIST:
-                        del strips[icao_id]
-                        continue
+                    # SMART PURGE: Delete unannounced traffic if it turns away
+                    if dist > 110 and not is_cjb_bound and not s.get("is_scheduled", False):
+                        if trk_diff > 45:
+                            del strips[icao_id]
+                            continue
                        
-                    # OUTBOUND PURGE 3: Discard circuit/training flights entering 25 NM (46.3km) & exiting past 27 NM (50km)
+                    # CIRCUIT PURGE:
                     if dist > 50.0 and s["min_distance"] < 46.3:
-                        if not (s.get("is_scheduled", False) or norm_cs in NORMALIZED_MANUAL_LIST):
+                        if not (s.get("is_scheduled", False) or is_cjb_bound or norm_cs in NORMALIZED_MANUAL_LIST):
                             CIRCUIT_FLIGHTS_IGNORE[icao_id] = now
                             del strips[icao_id]
                             continue
