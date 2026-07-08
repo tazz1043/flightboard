@@ -16,7 +16,7 @@ VOCB_LAT = 11.0300
 VOCB_LON = 77.0434
 AIRPORT_ELEV = 1322 
 TARGET_IATA = "CJB"
-REGION_BOUNDS = "0.0,65.0,25.0,90.0" # Expanded for larger airborne coverage
+REGION_BOUNDS = "40.0,-5.0,50.0,110.0"
 EXPECTED_CALLSIGNS = []
 
 ACTIVE_RUNWAY = "23"
@@ -25,7 +25,6 @@ DYNAMIC_WATCHLIST = {}
 LAST_SCHEDULE_FETCH = 0
 NORMALIZED_MANUAL_LIST = set()
 strips = {}
-CIRCUIT_FLIGHTS_IGNORE = {}
 
 ORIGIN_COORDS = {
     "DEL": (28.5562, 77.1000), "MAA": (12.9941, 80.1709),
@@ -161,13 +160,12 @@ def get_deep_atd(flight_id):
 
 # --- BACKGROUND RADAR ENGINE ---
 async def radar_loop():
-    global strips, CIRCUIT_FLIGHTS_IGNORE
+    global strips
     while True:
         await asyncio.to_thread(update_dynamic_watchlist)
         rwy_in_use = await asyncio.to_thread(get_active_runway)
        
         try:
-            # Expanded scan to catch departures from source
             flights = await asyncio.to_thread(fr_api.get_flights, bounds=REGION_BOUNDS)
             now = time.time()
            
@@ -175,12 +173,6 @@ async def radar_loop():
                 if not f.latitude or not f.longitude: continue
                
                 icao_id = f.id
-               
-                if icao_id in CIRCUIT_FLIGHTS_IGNORE:
-                    if now - CIRCUIT_FLIGHTS_IGNORE[icao_id] < 3600:
-                        continue
-                    else:
-                        del CIRCUIT_FLIGHTS_IGNORE[icao_id]
                
                 dist = get_distance(f.latitude, f.longitude, VOCB_LAT, VOCB_LON)
                 alt = f.altitude
@@ -205,6 +197,7 @@ async def radar_loop():
                                
                 if not norm_cs or norm_cs == "UNK": continue
 
+                # Added ROBIN and IL78 to blackout filters
                 TACTICAL_CALLSIGNS = ("IFC", "RAVEN", "SARANG", "TEJAS", "IAF", "VAYU", "SULUR", "DEF", "K1", "K2", "CHETAK", "VU", "ROBIN")
                 MILITARY_AIRCRAFT = ("SU30", "LCA", "AN32", "IL76", "IL78", "C17", "C130", "HAWK", "D228")
                
@@ -223,22 +216,21 @@ async def radar_loop():
 
                 is_already_tracked = (icao_id in strips) or (duplicate_id is not None)
                 is_auto_expected = (norm_cs in DYNAMIC_WATCHLIST) or (f_num in DYNAMIC_WATCHLIST)
-                is_cjb_bound = dest_iata in [TARGET_IATA, "VOCB"]
                
-                # --- NEW: Enhanced Vector Intercept ---
-                bearing_to_cjb = calculate_bearing(f.latitude, f.longitude, VOCB_LAT, VOCB_LON)
-                trk = getattr(f, 'heading', 0)
-                trk_diff = abs((trk - bearing_to_cjb + 180) % 360 - 180)
+                if not is_already_tracked:
+                    if dest_iata and dest_iata not in [TARGET_IATA, "N/A", ""]:
+                        continue
                
-                is_unannounced_arrival = (
-                    (dist < 500) and # Capture from far out
-                    (trk_diff < 15) # Must be heading toward CJB
-                )
-                # --------------------------------------
+                if not is_already_tracked and dist < 60 and v_speed > 250 and dest_iata != TARGET_IATA:
+                    continue
                
+                is_cjb_bound = dest_iata == TARGET_IATA
+                is_manual_expected = norm_cs in NORMALIZED_MANUAL_LIST
+                is_unannounced_arrival = (dest_iata in ["", "N/A"]) and (dist < 75) and (alt < 15000) and (v_speed < -150)
+
                 is_qualified = (
                     is_already_tracked or is_cjb_bound or is_auto_expected or
-                    norm_cs in NORMALIZED_MANUAL_LIST or is_unannounced_arrival
+                    is_manual_expected or is_unannounced_arrival
                 )
                
                 if not is_qualified:
@@ -258,7 +250,10 @@ async def radar_loop():
                 eta_unix = float('inf')
                
                 if gs > 50 and not on_ground:
-                    angle_diff = abs((bearing_to_cjb - (233 if rwy_in_use == "23" else 53) + 180) % 360 - 180)
+                    bearing = calculate_bearing(f.latitude, f.longitude, VOCB_LAT, VOCB_LON)
+                    rwy_heading = 233 if rwy_in_use == "23" else 53
+                    angle_diff = abs((bearing - rwy_heading + 180) % 360 - 180)
+                   
                     dist_nm = dist / 1.852
                     gs_knots = max(gs, 150)
                     is_turboprop = aircraft_type.startswith("AT") or "ATR" in aircraft_type or aircraft_type.startswith("DH")
@@ -322,8 +317,7 @@ async def radar_loop():
                         "dest": "VOCB", "aircraft": f.aircraft_code if f.aircraft_code else "UNK", "speed": gs,
                         "status": init_status, "dep_time": final_dep_str, "eta": eta_str, "sort_time": eta_unix,
                         "touchdown": None, "last_seen": now, "distance": int(dist), "last_real_distance": dist,
-                        "min_distance": dist,
-                        "is_scheduled": is_auto_expected or is_cjb_bound,
+                        "min_distance": dist,  # NEW: Tracks absolute closest approach
                         "last_dep_check": now, "initiated_missed_approach": historical_missed_approach
                     }
 
@@ -332,23 +326,15 @@ async def radar_loop():
                     s["last_seen"] = now
                     s["min_distance"] = min(s.get("min_distance", dist), dist)
                    
-                    # OUTBOUND PURGE: Delete far-flung traffic
-                    if dist > 300 and s["min_distance"] < 100:
+                    # OUTBOUND PURGE 1: Delete any tracked flight that moves away past 100 NM (185 km)
+                    if dist > 185 and s["min_distance"] < 100:
                         del strips[icao_id]
                         continue
                        
-                    # SMART PURGE: Delete unannounced traffic if it turns away
-                    if dist > 110 and not is_cjb_bound and not s.get("is_scheduled", False):
-                        if trk_diff > 45:
-                            del strips[icao_id]
-                            continue
-                       
-                    # CIRCUIT PURGE:
-                    if dist > 50.0 and s["min_distance"] < 46.3:
-                        if not (s.get("is_scheduled", False) or is_cjb_bound or norm_cs in NORMALIZED_MANUAL_LIST):
-                            CIRCUIT_FLIGHTS_IGNORE[icao_id] = now
-                            del strips[icao_id]
-                            continue
+                    # OUTBOUND PURGE 2: Delete unannounced non-CJB traffic wandering past 60 NM (110 km)
+                    if dist > 110 and dest_iata != TARGET_IATA and norm_cs not in NORMALIZED_MANUAL_LIST:
+                        del strips[icao_id]
+                        continue
                        
                     s["last_real_distance"] = dist
                     s["distance"] = int(dist)
@@ -407,6 +393,8 @@ async def radar_loop():
             time_lost = now - s["last_seen"]
            
             if s["status"] == "APPROACH" and s.get("last_real_distance", 999) < 85 and time_lost > 30:
+               
+                # Failsafe: Decelerating Ghost Protocol
                 last_dist = s.get("last_real_distance", 999)
                 if last_dist < 25:
                     ghost_kts = 145.0 
@@ -462,6 +450,7 @@ html_content = """
         .utc-clock { position: absolute; top: 0; right: 0; background-color: #000; color: #00ff00; padding: 8px 15px; border: 2px solid #555; font-size: 1.8em; font-weight: bold; box-shadow: 2px 2px 5px rgba(0,0,0,0.5);}
         .board { display: flex; flex-direction: column; gap: 8px; max-width: 1000px; margin: 0 auto; }
        
+        /* 3D Flexbox Strip UI */
         .strip {
             display: flex; width: 100%; box-sizing: border-box;
             background: linear-gradient(to bottom, #ffecb3 0%, #ffb74d 100%);
@@ -485,6 +474,7 @@ html_content = """
         .strip > div:nth-child(4) { flex: 2; }
         .strip > div:nth-child(5) { flex: 2; border-right: none; box-shadow: none; }
        
+        /* 3D States */
         .strip.approach {
             background: linear-gradient(to bottom, #bbdefb 0%, #42a5f5 100%);
         }
@@ -500,6 +490,7 @@ html_content = """
         .large-text { font-size: 1.3em; }
         .status-text { text-align: center; font-size: 1.1em; margin-top: 2px; }
        
+        /* Highlighted Distance Badge */
         .dist-highlight {
             font-size: 1.4em;
             font-weight: 900;
@@ -513,6 +504,7 @@ html_content = """
             display: inline-block;
         }
 
+        /* Inset Screen Look for ETA */
         .eta-box {
             background: #fafafa;
             border: 1px solid #777;
