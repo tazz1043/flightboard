@@ -25,7 +25,6 @@ DYNAMIC_WATCHLIST = {}
 LAST_SCHEDULE_FETCH = 0
 NORMALIZED_MANUAL_LIST = set()
 strips = {}
-CIRCUIT_FLIGHTS_IGNORE = {}
 
 ORIGIN_COORDS = {
     "DEL": (28.5562, 77.1000), "MAA": (12.9941, 80.1709),
@@ -161,7 +160,7 @@ def get_deep_atd(flight_id):
 
 # --- BACKGROUND RADAR ENGINE ---
 async def radar_loop():
-    global strips, CIRCUIT_FLIGHTS_IGNORE
+    global strips
     while True:
         await asyncio.to_thread(update_dynamic_watchlist)
         rwy_in_use = await asyncio.to_thread(get_active_runway)
@@ -174,12 +173,6 @@ async def radar_loop():
                 if not f.latitude or not f.longitude: continue
                
                 icao_id = f.id
-               
-                if icao_id in CIRCUIT_FLIGHTS_IGNORE:
-                    if now - CIRCUIT_FLIGHTS_IGNORE[icao_id] < 3600:
-                        continue
-                    else:
-                        del CIRCUIT_FLIGHTS_IGNORE[icao_id]
                
                 dist = get_distance(f.latitude, f.longitude, VOCB_LAT, VOCB_LON)
                 alt = f.altitude
@@ -204,6 +197,7 @@ async def radar_loop():
                                
                 if not norm_cs or norm_cs == "UNK": continue
 
+                # Added ROBIN and IL78 to blackout filters
                 TACTICAL_CALLSIGNS = ("IFC", "RAVEN", "SARANG", "TEJAS", "IAF", "VAYU", "SULUR", "DEF", "K1", "K2", "CHETAK", "VU", "ROBIN")
                 MILITARY_AIRCRAFT = ("SU30", "LCA", "AN32", "IL76", "IL78", "C17", "C130", "HAWK", "D228")
                
@@ -222,14 +216,21 @@ async def radar_loop():
 
                 is_already_tracked = (icao_id in strips) or (duplicate_id is not None)
                 is_auto_expected = (norm_cs in DYNAMIC_WATCHLIST) or (f_num in DYNAMIC_WATCHLIST)
-                is_cjb_bound = dest_iata in [TARGET_IATA, "VOCB"]
                
-                # REVERTED LOGIC: Use strict geofence/plan matching
+                if not is_already_tracked:
+                    if dest_iata and dest_iata not in [TARGET_IATA, "N/A", ""]:
+                        continue
+               
+                if not is_already_tracked and dist < 60 and v_speed > 250 and dest_iata != TARGET_IATA:
+                    continue
+               
+                is_cjb_bound = dest_iata == TARGET_IATA
+                is_manual_expected = norm_cs in NORMALIZED_MANUAL_LIST
                 is_unannounced_arrival = (dest_iata in ["", "N/A"]) and (dist < 75) and (alt < 15000) and (v_speed < -150)
-               
+
                 is_qualified = (
                     is_already_tracked or is_cjb_bound or is_auto_expected or
-                    norm_cs in NORMALIZED_MANUAL_LIST or is_unannounced_arrival
+                    is_manual_expected or is_unannounced_arrival
                 )
                
                 if not is_qualified:
@@ -258,16 +259,23 @@ async def radar_loop():
                     is_turboprop = aircraft_type.startswith("AT") or "ATR" in aircraft_type or aircraft_type.startswith("DH")
                    
                     arc_penalty = 0
-                    if angle_diff > 45: arc_penalty = 4.0 if is_turboprop else 3.0
+                    if angle_diff > 45:
+                        arc_penalty = 4.0 if is_turboprop else 3.0
                        
                     if is_turboprop:
-                        if dist_nm <= 50: mins_remaining = (dist_nm / 50.0) * 18.0
-                        elif dist_nm <= 100: mins_remaining = 18.0 + ((dist_nm - 50.0) / 50.0) * 12.0
-                        else: mins_remaining = 30.0 + ((dist_nm - 100.0) / (gs_knots / 60.0))
+                        if dist_nm <= 50:
+                            mins_remaining = (dist_nm / 50.0) * 18.0
+                        elif dist_nm <= 100:
+                            mins_remaining = 18.0 + ((dist_nm - 50.0) / 50.0) * 12.0
+                        else:
+                            mins_remaining = 30.0 + ((dist_nm - 100.0) / (gs_knots / 60.0))
                     else:
-                        if dist_nm <= 50: mins_remaining = (dist_nm / 50.0) * 13.0
-                        elif dist_nm <= 100: mins_remaining = 13.0 + ((dist_nm - 50.0) / 50.0) * 7.0
-                        else: mins_remaining = 20.0 + ((dist_nm - 100.0) / (gs_knots / 60.0))
+                        if dist_nm <= 50:
+                            mins_remaining = (dist_nm / 50.0) * 13.0
+                        elif dist_nm <= 100:
+                            mins_remaining = 13.0 + ((dist_nm - 50.0) / 50.0) * 7.0
+                        else:
+                            mins_remaining = 20.0 + ((dist_nm - 100.0) / (gs_knots / 60.0))
                            
                     mins_remaining += arc_penalty
                     hours_remaining = mins_remaining / 60.0
@@ -309,8 +317,7 @@ async def radar_loop():
                         "dest": "VOCB", "aircraft": f.aircraft_code if f.aircraft_code else "UNK", "speed": gs,
                         "status": init_status, "dep_time": final_dep_str, "eta": eta_str, "sort_time": eta_unix,
                         "touchdown": None, "last_seen": now, "distance": int(dist), "last_real_distance": dist,
-                        "min_distance": dist,
-                        "is_scheduled": is_auto_expected or is_cjb_bound,
+                        "min_distance": dist,  # NEW: Tracks absolute closest approach
                         "last_dep_check": now, "initiated_missed_approach": historical_missed_approach
                     }
 
@@ -319,10 +326,15 @@ async def radar_loop():
                     s["last_seen"] = now
                     s["min_distance"] = min(s.get("min_distance", dist), dist)
                    
-                    if dist > 300 and s["min_distance"] < 100: del strips[icao_id]; continue
-                    if dist > 50.0 and s["min_distance"] < 46.3 and not (s.get("is_scheduled", False) or norm_cs in NORMALIZED_MANUAL_LIST):
-                        CIRCUIT_FLIGHTS_IGNORE[icao_id] = now
-                        del strips[icao_id]; continue
+                    # OUTBOUND PURGE 1: Delete any tracked flight that moves away past 100 NM (185 km)
+                    if dist > 185 and s["min_distance"] < 100:
+                        del strips[icao_id]
+                        continue
+                       
+                    # OUTBOUND PURGE 2: Delete unannounced non-CJB traffic wandering past 60 NM (110 km)
+                    if dist > 110 and dest_iata != TARGET_IATA and norm_cs not in NORMALIZED_MANUAL_LIST:
+                        del strips[icao_id]
+                        continue
                        
                     s["last_real_distance"] = dist
                     s["distance"] = int(dist)
@@ -373,7 +385,42 @@ async def radar_loop():
                                 s["touchdown"] = td_time.strftime("%H:%M:%S")
                                 s["sort_time"] = td_time.timestamp()
 
-        except Exception as e: print(f"Radar Error: {e}")
+        except Exception as e: print(f"Radar polling error: {e}")
+
+        now = time.time()
+        for k in list(strips.keys()):
+            s = strips[k]
+            time_lost = now - s["last_seen"]
+           
+            if s["status"] == "APPROACH" and s.get("last_real_distance", 999) < 85 and time_lost > 30:
+               
+                # Failsafe: Decelerating Ghost Protocol
+                last_dist = s.get("last_real_distance", 999)
+                if last_dist < 25:
+                    ghost_kts = 145.0 
+                elif last_dist < 50:
+                    ghost_kts = 210.0 
+                else:
+                    ghost_kts = s["speed"]
+                   
+                speed_km_sec = max(ghost_kts, 130) * 0.000514
+                ghost_dist = last_dist - (speed_km_sec * time_lost)
+               
+                if ghost_dist <= 0 or (s["distance"] < 6 and time_lost > 75):
+                    if s["status"] != "LANDED":
+                        exact_td_unix = s["last_seen"] + (last_dist / speed_km_sec)
+                        if now >= exact_td_unix:
+                            s["status"] = "LANDED"
+                            s["distance"] = 0
+                            exact_td_time = datetime.fromtimestamp(exact_td_unix, timezone.utc)
+                            s["touchdown"] = exact_td_time.strftime("%H:%M:%S")
+                            s["sort_time"] = exact_td_unix
+                            s["last_seen"] = now 
+                else:
+                    s["distance"] = int(max(1, ghost_dist))
+               
+            elif time_lost > 1800: del strips[k]
+           
         await asyncio.sleep(8)
 
 @app.on_event("startup")
@@ -402,14 +449,70 @@ html_content = """
         .rwy-header { color: #ffeb3b; font-weight: bold; font-size: 1.2em;}
         .utc-clock { position: absolute; top: 0; right: 0; background-color: #000; color: #00ff00; padding: 8px 15px; border: 2px solid #555; font-size: 1.8em; font-weight: bold; box-shadow: 2px 2px 5px rgba(0,0,0,0.5);}
         .board { display: flex; flex-direction: column; gap: 8px; max-width: 1000px; margin: 0 auto; }
-        .strip { display: flex; width: 100%; box-sizing: border-box; background: linear-gradient(to bottom, #ffecb3 0%, #ffb74d 100%); border: 1px solid #444; border-bottom: 4px solid #333; border-radius: 6px; box-shadow: 0 6px 10px rgba(0,0,0,0.5), inset 0 2px 2px rgba(255,255,255,0.8); height: 65px; font-weight: bold; font-size: 1.1em; margin-bottom: 4px; transition: all 0.2s ease;}
-        .strip > div { box-sizing: border-box; border-right: 1px solid rgba(0,0,0,0.3); box-shadow: inset -1px 0 0 rgba(255,255,255,0.4); padding: 5px 10px; display: flex; flex-direction: column; justify-content: center; overflow: hidden; }
-        .strip > div:nth-child(1) { flex: 3; } .strip > div:nth-child(2) { flex: 3; } .strip > div:nth-child(3) { flex: 2; } .strip > div:nth-child(4) { flex: 2; } .strip > div:nth-child(5) { flex: 2; border-right: none; box-shadow: none; }
-        .strip.approach { background: linear-gradient(to bottom, #bbdefb 0%, #42a5f5 100%); }
-        .strip.landed { background: linear-gradient(to bottom, #c8e6c9 0%, #66bb6a 100%); color: #333; border-bottom: 1px solid #444; transform: translateY(3px); box-shadow: 0 2px 4px rgba(0,0,0,0.4), inset 0 1px 1px rgba(255,255,255,0.5); }
-        .small-text { font-size: 0.75em; color: #444; } .large-text { font-size: 1.3em; } .status-text { text-align: center; font-size: 1.1em; margin-top: 2px; }
-        .dist-highlight { font-size: 1.4em; font-weight: 900; color: #000; background-color: rgba(255, 255, 255, 0.7); padding: 1px 6px; border-radius: 4px; border: 1px solid rgba(0,0,0,0.3); box-shadow: 1px 1px 3px rgba(0,0,0,0.3); margin-left: 5px; display: inline-block;}
-        .eta-box { background: #fafafa; border: 1px solid #777; border-top: 2px solid #222; border-left: 2px solid #222; padding: 2px 12px; margin-top: 4px; border-radius: 4px; text-align: center; display: inline-block; font-size: 1.6em; box-shadow: inset 2px 2px 5px rgba(0,0,0,0.2), 0 1px 0 rgba(255,255,255,0.6);}
+       
+        /* 3D Flexbox Strip UI */
+        .strip {
+            display: flex; width: 100%; box-sizing: border-box;
+            background: linear-gradient(to bottom, #ffecb3 0%, #ffb74d 100%);
+            border: 1px solid #444;
+            border-bottom: 4px solid #333;
+            border-radius: 6px;
+            box-shadow: 0 6px 10px rgba(0,0,0,0.5), inset 0 2px 2px rgba(255,255,255,0.8);
+            height: 65px; font-weight: bold; font-size: 1.1em;
+            margin-bottom: 4px;
+            transition: all 0.2s ease;
+        }
+        .strip > div {
+            box-sizing: border-box;
+            border-right: 1px solid rgba(0,0,0,0.3);
+            box-shadow: inset -1px 0 0 rgba(255,255,255,0.4);
+            padding: 5px 10px; display: flex; flex-direction: column; justify-content: center; overflow: hidden;
+        }
+        .strip > div:nth-child(1) { flex: 3; }
+        .strip > div:nth-child(2) { flex: 3; }
+        .strip > div:nth-child(3) { flex: 2; }
+        .strip > div:nth-child(4) { flex: 2; }
+        .strip > div:nth-child(5) { flex: 2; border-right: none; box-shadow: none; }
+       
+        /* 3D States */
+        .strip.approach {
+            background: linear-gradient(to bottom, #bbdefb 0%, #42a5f5 100%);
+        }
+        .strip.landed {
+            background: linear-gradient(to bottom, #c8e6c9 0%, #66bb6a 100%);
+            color: #333;
+            border-bottom: 1px solid #444;
+            transform: translateY(3px);
+            box-shadow: 0 2px 4px rgba(0,0,0,0.4), inset 0 1px 1px rgba(255,255,255,0.5);
+        }
+       
+        .small-text { font-size: 0.75em; color: #444; }
+        .large-text { font-size: 1.3em; }
+        .status-text { text-align: center; font-size: 1.1em; margin-top: 2px; }
+       
+        /* Highlighted Distance Badge */
+        .dist-highlight {
+            font-size: 1.4em;
+            font-weight: 900;
+            color: #000;
+            background-color: rgba(255, 255, 255, 0.7);
+            padding: 1px 6px;
+            border-radius: 4px;
+            border: 1px solid rgba(0,0,0,0.3);
+            box-shadow: 1px 1px 3px rgba(0,0,0,0.3);
+            margin-left: 5px;
+            display: inline-block;
+        }
+
+        /* Inset Screen Look for ETA */
+        .eta-box {
+            background: #fafafa;
+            border: 1px solid #777;
+            border-top: 2px solid #222;
+            border-left: 2px solid #222;
+            padding: 2px 12px; margin-top: 4px; border-radius: 4px; text-align: center; display: inline-block; font-size: 1.6em;
+            box-shadow: inset 2px 2px 5px rgba(0,0,0,0.2), 0 1px 0 rgba(255,255,255,0.6);
+        }
         .landed .eta-box { background: transparent; border: none; box-shadow: none; text-decoration: line-through;}
     </style>
 </head>
@@ -420,36 +523,94 @@ html_content = """
         <div id="clock" class="utc-clock">00:00:00</div>
     </div>
     <div id="board" class="board">
-        <p style="text-align: center; color: #fff;">Connecting to radar...</p>
+        <p style="text-align: center; color: #fff;">Connecting to radar... calculating ETA vectors.</p>
     </div>
+
     <script>
+        let usePolling = false;
+       
         const initialServerTime = {{SERVER_TIME}};
         const initialLocalTime = Date.now();
+
         function updateClock() {
             var elapsed = Date.now() - initialLocalTime;
             var trueNow = new Date(initialServerTime + elapsed);
-            document.getElementById('clock').innerText = ('0' + trueNow.getUTCHours()).slice(-2) + ':' + ('0' + trueNow.getUTCMinutes()).slice(-2) + ':' + ('0' + trueNow.getUTCSeconds()).slice(-2);
+           
+            var hours = ('0' + trueNow.getUTCHours()).slice(-2);
+            var minutes = ('0' + trueNow.getUTCMinutes()).slice(-2);
+            var seconds = ('0' + trueNow.getUTCSeconds()).slice(-2);
+            document.getElementById('clock').innerText = hours + ':' + minutes + ':' + seconds;
         }
         setInterval(updateClock, 1000);
         updateClock();
+
         function renderFlights(flights) {
             const container = document.getElementById('board');
-            if (flights.length === 0) { container.innerHTML = '<p style="text-align: center; color: #fff;">No inbound flights.</p>'; return; }
+            const rwyDisplay = document.getElementById('rwy-display');
+           
+            if (flights.length > 0 && flights[0].rwy) { rwyDisplay.innerText = `ACTIVE RUNWAY IN USE: ${flights[0].rwy}`; }
+
+            if (flights.length === 0) {
+                container.innerHTML = '<p style="text-align: center; color: #fff;">No inbound flights found currently.</p>';
+                return;
+            }
+
             container.innerHTML = '';
+           
             flights.forEach(f => {
                 const div = document.createElement('div');
-                div.className = "strip" + (f.status === "APPROACH" ? " approach" : "") + (f.status === "LANDED" ? " landed" : "");
+                let stripClass = "strip";
+                if (f.status === "APPROACH") stripClass += " approach";
+                if (f.status === "LANDED") stripClass += " landed";
+                div.className = stripClass;
+               
                 const distNM = Math.round(f.distance * 0.539957);
-                div.innerHTML = `<div><span class="large-text">${f.callsign}</span><span class="small-text">${f.aircraft} | ${f.speed} kts</span></div>` +
-                                `<div><span class="large-text">${f.origin} ✈️ ${f.dest}</span><span class="small-text">${f.dep_time} | <span class="dist-highlight">${distNM} NM</span></span></div>` +
-                                `<div style="align-items: center;"><svg width="22" height="22" viewBox="0 0 24 24" fill="#000" style="margin-bottom: 2px;"><path d="M9 2v12H4l8 8 8-8h-5V2H9z"/></svg><span class="status-text">${f.status}</span></div>` +
-                                `<div style="align-items: center;"><span class="small-text">ETA (UTC)</span><span class="eta-box">${f.eta}</span></div>` +
-                                `<div><span class="small-text">ATA (UTC)</span><span style="color: ${f.touchdown ? '#d32f2f' : 'inherit'}; text-align: center; font-size: 1.6em; font-weight: bold;">${f.touchdown || "--:--:--"}</span></div>`;
+
+                const block1 = `<div><span class="large-text">${f.callsign}</span><span class="small-text">${f.aircraft} | ${f.speed} kts</span></div>`;
+                const block2 = `<div><span class="large-text">${f.origin} ✈️ ${f.dest}</span><span class="small-text">${f.dep_time} | <span class="dist-highlight">${distNM} NM</span></span></div>`;
+               
+                const block3 = `<div style="align-items: center;">
+                                    <svg width="22" height="22" viewBox="0 0 24 24" fill="#000" style="margin-bottom: 2px; filter: drop-shadow(0px 1px 1px rgba(255,255,255,0.4));">
+                                        <path d="M9 2v12H4l8 8 8-8h-5V2H9z"/>
+                                    </svg>
+                                    <span class="status-text">${f.status}</span>
+                                </div>`;
+               
+                const block4 = `<div style="align-items: center;"><span class="small-text">ETA (UTC)</span><span class="eta-box">${f.eta}</span></div>`;
+                const tdTime = f.touchdown ? f.touchdown : "--:--:--";
+                const tdColor = f.touchdown ? '#d32f2f' : 'inherit';
+                const block5 = `<div><span class="small-text">ATA (UTC)</span><span style="color: ${tdColor}; text-align: center; font-size: 1.6em; font-weight: bold;">${tdTime}</span></div>`;
+
+                div.innerHTML = block1 + block2 + block3 + block4 + block5;
                 container.appendChild(div);
             });
         }
-        const ws = new WebSocket((window.location.protocol === "https:" ? "wss:" : "ws:") + "//" + window.location.host + "/ws");
-        ws.onmessage = (event) => { renderFlights(JSON.parse(event.data)); };
+
+        function fetchFlightsPolling() {
+            fetch('/api/flights')
+                .then(response => response.json())
+                .then(data => renderFlights(data))
+                .catch(err => console.error("HTTP Polling Error:", err));
+        }
+
+        function connectWebSocket() {
+            if (usePolling) return;
+
+            const ws_protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+            const ws = new WebSocket(ws_protocol + "//" + window.location.host + "/ws");
+           
+            ws.onmessage = (event) => { renderFlights(JSON.parse(event.data)); };
+
+            ws.onerror = () => {
+                console.log("WebSocket blocked. Falling back to HTTP Polling...");
+                usePolling = true;
+                fetchFlightsPolling();
+                setInterval(fetchFlightsPolling, 8000);
+            };
+            ws.onclose = () => { if (!usePolling) { setTimeout(connectWebSocket, 3000); } };
+        }
+       
+        connectWebSocket();
     </script>
 </body>
 </html>
@@ -457,17 +618,19 @@ html_content = """
 
 @app.get("/")
 async def get_webpage():
-    return HTMLResponse(html_content.replace("{{SERVER_TIME}}", str(int(time.time() * 1000))))
+    server_time_ms = int(time.time() * 1000)
+    rendered_html = html_content.replace("{{SERVER_TIME}}", str(server_time_ms))
+    return HTMLResponse(rendered_html)
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     try:
         while True:
-            s_snap = list(strips.items())
-            cur = [{"icao": k, "rwy": ACTIVE_RUNWAY, **v} for k, v in s_snap]
-            cur.sort(key=lambda x: x["sort_time"])
-            await websocket.send_json(cur)
+            strips_snapshot = list(strips.items())
+            current_strips = [{"icao": k, "rwy": ACTIVE_RUNWAY, **v} for k, v in strips_snapshot]
+            current_strips.sort(key=lambda x: x["sort_time"])
+            await websocket.send_json(current_strips)
             await asyncio.sleep(8)
     except Exception:
         pass
